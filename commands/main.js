@@ -31,37 +31,22 @@ async function enviarMenuConPortada(sock, chatId, msg, db, texto) {
     return sock.sendMessage(chatId, { text: texto }, { quoted: msg });
 }
 
-// Cola propia de stickers: ffmpeg en Render (512MB) no aguanta varias
-// conversiones a la vez — pedir muchos juntos los mataba a todos con error.
-// Máx 2 convirtiendo, el resto espera su turno en vez de fallar.
-let stickersActivos = 0;
-const colaStickers = [];
-const MAX_STICKERS_PARALELO = 2;
-const MAX_COLA_STICKERS = 6;
-function liberarSlotSticker() {
-    stickersActivos = Math.max(0, stickersActivos - 1);
-    if (colaStickers.length > 0) {
-        const next = colaStickers.shift();
-        stickersActivos++;
-        next();
-    }
-}
-function esperarSlotSticker() {
-    return new Promise((resolve) => {
-        if (stickersActivos < MAX_STICKERS_PARALELO) {
-            stickersActivos++;
-            return resolve(true);
-        }
-        if (colaStickers.length >= MAX_COLA_STICKERS) return resolve(false);
-        colaStickers.push(() => resolve(true));
-    });
+const DOWNLOAD_MEDIA_TIMEOUT_MS = 20000;
+function descargarConTimeout(downloadMediaMessage, target, timeoutMs = DOWNLOAD_MEDIA_TIMEOUT_MS) {
+    let timer;
+    return Promise.race([
+        downloadMediaMessage(target, 'buffer', {}),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('download timeout')), timeoutMs);
+        })
+    ]).finally(() => clearTimeout(timer));
 }
 
 module.exports = {
     name: 'main',
     isMultiple: true,
     names: ['!menu', '!menu2', '!help', '!s', '!sticker', '!toimg'],
-    async execute(sock, chatId, msg, args, { start, cmd, txt, isGroup, sender, pushName, downloadMediaMessage, convertirAWebp, extraerAudioSticker, prepararAudioParaSticker, FFMPEG_PATH, botState, db }) {
+    async execute(sock, chatId, msg, args, { start, cmd, txt, isGroup, sender, pushName, downloadMediaMessage, convertirAWebp, extraerAudioSticker, prepararAudioParaSticker, stickerPool, FFMPEG_PATH, botState, db }) {
 
         // !ping esta manejado por commands/ping.js (mide latencia real con timestamp).
         // Se elimino la version duplicada de aqui, que nunca se ejecutaba (ping.js
@@ -570,55 +555,78 @@ module.exports = {
                 console.log(`[STICKER] Video largo (${Math.round(videoInfo.seconds)}s): se convierte con los primeros segundos.`);
             }
 
-            // Si hay fila de stickers esperando, se espera el turno en vez de
-            // fallar: cada conversión sale una por una sin tumbar al bot.
-            const hayTurno = await esperarSlotSticker();
-            if (!hayTurno) {
-                return sock.sendMessage(chatId, { text: '⏳ *Hay muchos stickers en fila.*\nEspera unos segundos y manda el tuyo de nuevo.' }, { quoted: msg });
-            }
+            const entradaMedia = mediaPropia ? msg : { key: msg.key, message: citada };
+            const necesitaAudio = esVideo || !!audioCitado;
+            const fallbackAudio = (buf, maxSeg) => prepararAudioParaSticker(buf, FFMPEG_PATH, maxSeg);
+            const manejarErrorDescarga = (eDesc) => {
+                console.error('[STICKER] Descarga falló:', eDesc.message);
+                const msgCaduco = eDesc.message && (eDesc.message.includes('404') || eDesc.message.includes('410') || eDesc.message.includes('vacío'));
+                return sock.sendMessage(chatId, {
+                    text: msgCaduco
+                        ? '⚠️ *No pude descargar ese archivo.*\n\nLos mensajes viejos caducan en WhatsApp: mándalo de nuevo al chat y responde *!s*.'
+                        : '⚠️ *No pude descargar ese archivo.*\n\nMándalo de nuevo al chat y responde *!s*.'
+                }, { quoted: msg });
+            };
+
             try {
-                // La media puede ser la del mensaje (imagen con caption) o la
-                // citada. Se descarga la correcta: si se citó un audio y la
-                // imagen vino en el mensaje, bajar `citada` bajaría el audio.
-                const entradaMedia = mediaPropia ? msg : { key: msg.key, message: citada };
-                let buffer;
-                try {
-                    buffer = await downloadMediaMessage(entradaMedia, 'buffer', {});
-                } catch (eDesc) {
-                    console.error('[STICKER] Descarga falló:', eDesc.message);
-                    return sock.sendMessage(chatId, { text: '⚠️ *No pude descargar ese archivo.*\n\nLos mensajes viejos caducan en WhatsApp: mándalo de nuevo al chat y responde *!s*.' }, { quoted: msg });
-                }
-                if (!buffer || buffer.length === 0) {
-                    return sock.sendMessage(chatId, { text: '⚠️ *No pude descargar ese archivo.*\n\nMándalo de nuevo al chat y responde *!s*.' }, { quoted: msg });
-                }
-                // Tope 15MB: archivos más grandes tumban la RAM de Render
-                if (buffer.length > 15 * 1024 * 1024) {
-                    return sock.sendMessage(chatId, { text: '⚠️ *Archivo muy pesado* (más de 15MB).\nManda un video más corto o una imagen más liviana.' }, { quoted: msg });
-                }
-                // El audio es liviano (un pase de ffmpeg) y el WebP es lo
-                // pesado (encode de ~48 frames en 0.1 vCPU): se corren EN
-                // PARALELO para que el audio no sume su tiempo en serie.
-                const tareaAudio = (async () => {
-                    try {
-                        if (esVideo) {
-                            return await prepararAudioParaSticker(buffer, FFMPEG_PATH, 6);
-                        }
-                        if (audioCitado) {
-                            const audioBuf = await downloadMediaMessage({ key: msg.key, message: citada }, 'buffer', {});
-                            // Mismo tope que la media principal: un audio enorme no
-                            // debe tumbar la RAM de Render.
-                            if (audioBuf && audioBuf.length && audioBuf.length <= 15 * 1024 * 1024) {
-                                return await prepararAudioParaSticker(audioBuf, FFMPEG_PATH, 10);
-                            }
-                        }
-                    } catch (eAudio) {
-                        // El audio es opcional: si falla, el sticker normal sigue.
-                        console.warn('[STICKER] No pude preparar el sonido:', eAudio.message);
+                let stiker = null;
+                let audio = null;
+
+                if (stickerPool) {
+                    const res = await stickerPool.procesarSticker({
+                        descargarMedia: () => descargarConTimeout(downloadMediaMessage, entradaMedia),
+                        descargarAudioCitado: (!esVideo && audioCitado)
+                            ? () => descargarConTimeout(downloadMediaMessage, { key: msg.key, message: citada })
+                            : null,
+                        esVideo,
+                        necesitaAudio,
+                        fallbackConvertir: convertirAWebp,
+                        fallbackAudio,
+                        maxBytes: 15 * 1024 * 1024
+                    });
+                    if (res.overloaded) {
+                        return sock.sendMessage(chatId, { text: '⏳ *Hay muchos stickers en fila.*\nEspera unos segundos y manda el tuyo de nuevo.' }, { quoted: msg });
                     }
-                    return null;
-                })();
-                const stiker = await convertirAWebp(buffer, esVideo);
-                const audio = await tareaAudio;
+                    if (res.downloadError) return manejarErrorDescarga(res.downloadError);
+                    if (res.empty) {
+                        return sock.sendMessage(chatId, { text: '⚠️ *No pude descargar ese archivo.*\n\nMándalo de nuevo al chat y responde *!s*.' }, { quoted: msg });
+                    }
+                    if (res.tooLarge) {
+                        return sock.sendMessage(chatId, { text: '⚠️ *Archivo muy pesado* (más de 15MB).\nManda un video más corto o una imagen más liviana.' }, { quoted: msg });
+                    }
+                    stiker = res.stiker;
+                    audio = res.audio;
+                } else {
+                    let buffer;
+                    try {
+                        buffer = await descargarConTimeout(downloadMediaMessage, entradaMedia);
+                    } catch (eDesc) {
+                        return manejarErrorDescarga(eDesc);
+                    }
+                    if (!buffer || buffer.length === 0) {
+                        return sock.sendMessage(chatId, { text: '⚠️ *No pude descargar ese archivo.*\n\nMándalo de nuevo al chat y responde *!s*.' }, { quoted: msg });
+                    }
+                    if (buffer.length > 15 * 1024 * 1024) {
+                        return sock.sendMessage(chatId, { text: '⚠️ *Archivo muy pesado* (más de 15MB).\nManda un video más corto o una imagen más liviana.' }, { quoted: msg });
+                    }
+                    const tareaAudio = (async () => {
+                        try {
+                            if (esVideo) return await fallbackAudio(buffer, 6);
+                            if (audioCitado) {
+                                const audioBuf = await descargarConTimeout(downloadMediaMessage, { key: msg.key, message: citada });
+                                if (audioBuf && audioBuf.length && audioBuf.length <= 15 * 1024 * 1024) {
+                                    return await fallbackAudio(audioBuf, 10);
+                                }
+                            }
+                        } catch (eAudio) {
+                            console.warn('[STICKER] No pude preparar el sonido:', eAudio.message);
+                        }
+                        return null;
+                    })();
+                    stiker = await convertirAWebp(buffer, esVideo);
+                    audio = await tareaAudio;
+                }
+
                 if (!stiker) {
                     return sock.sendMessage(chatId, { text: '❌ *No pude convertirlo* (formato raro).\nPrueba con otra imagen o GIF.' });
                 }
@@ -634,8 +642,6 @@ module.exports = {
             } catch (e) {
                 console.error('[STICKER] Error:', e.message);
                 return sock.sendMessage(chatId, { text: '❌ Error al crear sticker.' });
-            } finally {
-                liberarSlotSticker();
             }
         }
 

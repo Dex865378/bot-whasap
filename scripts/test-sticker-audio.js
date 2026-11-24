@@ -16,6 +16,8 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 const crypto = require('crypto');
+const http = require('http');
+const WebSocket = require('ws');
 const { proto, getMediaKeys } = require('@whiskeysockets/baileys');
 const pkg = require('protobufjs');
 const { Reader, Writer } = pkg;
@@ -29,11 +31,13 @@ const {
     TAG_AUDIO
 } = require('../utils/stickerSonido');
 const { extraerAudioSticker } = require('../utils/media');
+const { resolverFfmpeg, convertirAWebpBuffer } = require('../utils/stickerProcessor');
+const { StickerPool, signAuth, verifyAuth, encodeFrame, decodeFrame } = require('../utils/stickerPool');
 const { execute } = require('../commands/main');
 
 const RAIZ = path.join(__dirname, '..');
 const STICKER = path.join(RAIZ, 'sticker_bienvenida.webp');
-const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFMPEG = resolverFfmpeg(process.env.FFMPEG_PATH);
 const TIENE_FFMPEG = spawnSync(FFMPEG, ['-version'], { windowsHide: true }).status === 0;
 
 function leerAudioDelMensaje(message) {
@@ -133,12 +137,11 @@ function sockFalso({ fallaUpload = false } = {}) {
     });
 
     await probar('extraerAudioSticker saca Opus de un video con audio y null si es mudo', async () => {
-        const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
-        const version = spawnSync(ffmpeg, ['-version'], { windowsHide: true });
-        if (version.status !== 0) {
+        if (!TIENE_FFMPEG) {
             console.log('   (saltado: ffmpeg no está disponible)');
             return;
         }
+        const ffmpeg = FFMPEG;
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-audio-test-'));
         const conAudio = path.join(dir, 'con-audio.mp4');
         const mudo = path.join(dir, 'mudo.mp4');
@@ -448,6 +451,143 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.strictEqual(typeof calcularStreamingSidecar, 'function', 'debe exportar calcularStreamingSidecar');
         assert.strictEqual(typeof dimensionesWebp, 'function', 'debe exportar dimensionesWebp');
     });
+
+    await probar('encodeFrame/decodeFrame sin Base64 y firma HMAC anti-replay', () => {
+        const b1 = Buffer.from([1, 2, 3, 4, 5]);
+        const b2 = Buffer.from([9, 8, 7]);
+        const frame = encodeFrame({ type: 'job', id: 'j1', esVideo: true }, [b1, b2]);
+        const dec = decodeFrame(frame);
+        assert.strictEqual(dec.meta.id, 'j1');
+        assert.deepStrictEqual(Buffer.from(dec.buffers[0]), b1);
+        assert.deepStrictEqual(Buffer.from(dec.buffers[1]), b2);
+
+        const now = 1700000000000;
+        const secret = 'secreto-test';
+        const sig = signAuth(secret, now);
+        assert.strictEqual(verifyAuth(secret, now, sig, now + 5000), true);
+        assert.strictEqual(verifyAuth(secret, now - 300000, signAuth(secret, now - 300000), now), false, 'firma expirada debe fallar');
+        assert.strictEqual(verifyAuth(secret, now, 'deadbeef', now), false, 'firma manipulada debe fallar');
+    });
+
+    await probar('StickerPool combina PC (WebSocket) + Render local bajo rafaga y hace fallback si PC cae', async () => {
+        const secret = 'test-secret-pool';
+        let hechosEnLocal = 0;
+        const pool = new StickerPool({
+            maxLocal: 2,
+            maxQueue: 50,
+            workerJobTimeoutMs: 5000,
+            getSecret: () => secret,
+            localRunner: async ({ buffer }) => {
+                await new Promise(r => setTimeout(r, 30));
+                hechosEnLocal++;
+                return { stiker: Buffer.concat([Buffer.from('LOCAL:'), buffer.subarray(0, 4)]), audio: null };
+            }
+        });
+        const srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });
+        pool.attachServer(srv, { wsPath: '/ws/worker' });
+        await new Promise(r => srv.listen(0, '127.0.0.1', r));
+        const port = srv.address().port;
+
+        // 1. Conexión no autenticada debe ser rechazada
+        await assert.rejects(
+            () => new Promise((resolve, reject) => {
+                const badWs = new WebSocket(`ws://127.0.0.1:${port}/ws/worker?ts=${Date.now()}&sig=bad`);
+                badWs.on('open', () => { badWs.close(); resolve('opened'); });
+                badWs.on('error', reject);
+                badWs.on('unexpected-response', (_req, res) => reject(new Error(`HTTP ${res.statusCode}`)));
+            }),
+            /HTTP 401/
+        );
+
+        // 2. Worker PC autenticado con concurrencia = 3
+        const ts = Date.now();
+        const pcWs = new WebSocket(`ws://127.0.0.1:${port}/ws/worker?ts=${ts}&sig=${signAuth(secret, ts)}&name=ryzen&concurrency=3`);
+        await new Promise((resolve, reject) => {
+            pcWs.on('open', resolve);
+            pcWs.on('error', reject);
+        });
+        pcWs.on('message', async (data, isBinary) => {
+            if (!isBinary) return;
+            const { meta, buffers } = decodeFrame(data);
+            await new Promise(r => setTimeout(r, 20));
+            const out = Buffer.concat([Buffer.from('PC:'), buffers[0].subarray(0, 4)]);
+            pcWs.send(encodeFrame({ type: 'result', id: meta.id, ok: true, audioSegundos: 0 }, [out, Buffer.alloc(0), Buffer.alloc(0)]), { binary: true });
+        });
+        // Esperar registro del hello
+        await new Promise(r => setTimeout(r, 30));
+
+        // 3. Ráfaga de 14 peticiones simultáneas -> PC (3) + Render (2) + cola (9), 0 rechazadas
+        const resultados = await Promise.all(
+            Array.from({ length: 14 }, (_, i) => pool.procesarSticker({
+                descargarMedia: async () => Buffer.from(`img_${i}_payload`),
+                esVideo: false,
+                necesitaAudio: false,
+                fallbackConvertir: async () => null
+            }))
+        );
+        assert.strictEqual(resultados.filter(r => r.stiker && r.stiker.length > 0).length, 14, 'todos los 14 stickers deben completarse');
+        const st = pool.getStats();
+        assert.ok(st.donePc > 0 && st.doneLocal > 0, `debe combinar PC (${st.donePc}) y Render (${st.doneLocal})`);
+
+        // 4. Fallback si PC se cae en mitad del trabajo
+        pcWs.removeAllListeners('message');
+        pcWs.on('message', () => { pcWs.terminate(); });
+        const fallbackRes = await pool.procesarSticker({
+            descargarMedia: async () => Buffer.from('cae_pc_123'),
+            esVideo: false,
+            necesitaAudio: false,
+            fallbackConvertir: async () => null
+        });
+        assert.ok(fallbackRes.stiker && fallbackRes.stiker.toString().startsWith('LOCAL:'), 'si PC cae, Render completa el sticker');
+        assert.strictEqual(pool.getStats().fallbacks, 1);
+
+        pool.close();
+        await new Promise(r => srv.close(r));
+    });
+
+    await probar('!s acepta rafaga simultanea de 15 peticiones de un mismo usuario sin rechazar por cola', async () => {
+        const pool = new StickerPool({
+            maxLocal: 3,
+            maxQueue: 100,
+            localRunner: async ({ buffer }) => ({ stiker: Buffer.from('WEBP_OK_' + buffer.toString()), audio: null })
+        });
+        const enviados = [];
+        const sock = {
+            sendMessage: async (_jid, payload) => { enviados.push(payload); return { key: { id: 'k' } }; }
+        };
+        const trabajos = Array.from({ length: 15 }, (_, i) => execute(sock, 'grp@g.us', {
+            key: { id: 'm_' + i },
+            message: { imageMessage: { mimetype: 'image/jpeg', caption: '!s' } }
+        }, [], {
+            start: '!s', cmd: '!s', txt: '!s', isGroup: true, sender: 'u1@s.whatsapp.net', pushName: 'U',
+            downloadMediaMessage: async (m) => Buffer.from(m.key.id),
+            convertirAWebp: async (b) => b,
+            extraerAudioSticker: async () => null,
+            prepararAudioParaSticker: async () => null,
+            stickerPool: pool,
+            FFMPEG_PATH: FFMPEG, botState: {}, db: {}
+        }));
+        await Promise.all(trabajos);
+        const stickersOk = enviados.filter(e => Buffer.isBuffer(e.sticker));
+        assert.strictEqual(stickersOk.length, 15, 'ninguno de los 15 !s concurrentes debe ser rechazado');
+    });
+
+    await probar('index.js exime !s y !sticker de cooldowns, antiSpam y semaforo global', () => {
+        const idxSrc = fs.readFileSync(path.join(RAIZ, 'index.js'), 'utf8');
+        assert.ok(idxSrc.includes("UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker'])"), 'debe definir UNLIMITED_STICKER_CMDS');
+        const heavyMatch = idxSrc.match(/const heavyCmds = \[([^\]]+)\]/);
+        assert.ok(heavyMatch && !heavyMatch[1].includes("'!s'") && !heavyMatch[1].includes("'!sticker'"), '!s y !sticker fuera de heavyCmds');
+        assert.ok(idxSrc.includes('!esStickerIlimitado'), 'debe eximir !s/!sticker en antiSpam / dupCmd / cooldown global');
+        assert.ok(idxSrc.includes('!esStickerCmd'), '!s debe usar carril independiente de adquirirSlotMensaje');
+    });
+
+    if (TIENE_FFMPEG) {
+        await probar('convertirAWebpBuffer convierte imagen real de forma asincrona con exif', async () => {
+            const img = fs.readFileSync(STICKER);
+            const out = await convertirAWebpBuffer(img, false, { ffmpegPath: FFMPEG });
+            assert.ok(out && out.length > 20, 'debe producir un webp valido');
+        });
+    }
 
     console.log(fallos === 0 ? '\n🎉 TEST STICKER SONIDO OK' : `\n💥 TEST STICKER SONIDO: ${fallos} fallo(s)`);
     process.exit(fallos === 0 ? 0 : 1);

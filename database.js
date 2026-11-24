@@ -47,7 +47,7 @@ async function crearTablas() {
         `CREATE TABLE IF NOT EXISTS antifarma_off (chat_id TEXT PRIMARY KEY, desactivado_por TEXT, updated_at BIGINT)`,
         `CREATE TABLE IF NOT EXISTS warns (chat_id TEXT NOT NULL, user_id TEXT NOT NULL, count INTEGER DEFAULT 0, updated_at BIGINT, PRIMARY KEY (chat_id, user_id))`,
         `CREATE TABLE IF NOT EXISTS silenciados (user_id TEXT PRIMARY KEY, hasta BIGINT)`,
-        `CREATE TABLE IF NOT EXISTS bot_instancias (id TEXT PRIMARY KEY, servicio TEXT, commit_sha TEXT, last_seen BIGINT, conectado INTEGER DEFAULT 0, uptime INTEGER DEFAULT 0)`,
+        `CREATE TABLE IF NOT EXISTS bot_instancias (id TEXT PRIMARY KEY, servicio TEXT, commit_sha TEXT, last_seen BIGINT, conectado INTEGER DEFAULT 0, uptime INTEGER DEFAULT 0, public_url TEXT DEFAULT '')`,
         `CREATE TABLE IF NOT EXISTS afk (user_id TEXT PRIMARY KEY, motivo TEXT DEFAULT '', ts BIGINT)`,
         `CREATE TABLE IF NOT EXISTS actividad (chat_id TEXT NOT NULL, user_id TEXT NOT NULL, total INTEGER DEFAULT 0, ultima_actividad BIGINT DEFAULT 0, PRIMARY KEY (chat_id, user_id))`,
         `CREATE TABLE IF NOT EXISTS stickers_usuario (user_id TEXT NOT NULL, nombre TEXT NOT NULL, sticker BLOB NOT NULL, created_at BIGINT, PRIMARY KEY (user_id, nombre))`,
@@ -110,6 +110,7 @@ async function crearTablas() {
             // (gana la que lleva más tiempo; evita el bloqueo mutuo si dos
             // instancias arrancan a la vez).
             'ALTER TABLE bot_instancias ADD COLUMN uptime INTEGER DEFAULT 0',
+            'ALTER TABLE bot_instancias ADD COLUMN public_url TEXT DEFAULT \'\'',
             'ALTER TABLE auctions ADD COLUMN chat_id TEXT',
             'ALTER TABLE usuarios ADD COLUMN inventario TEXT DEFAULT \'{}\'',
             'ALTER TABLE usuarios ADD COLUMN duelos_ganados INTEGER DEFAULT 0',
@@ -268,25 +269,36 @@ async function obtenerSubasta(id) {
 
 // ========== FUNCIONES DE USUARIO (EL CORAZÓN) ==========
 
+// Single-flight: si llegan 20 comandos del mismo usuario nuevo al mismo
+// milisegundo, comparten la misma consulta en vez de saturar Turso.
+const inflightUsers = new Map();
+
 async function obtenerUsuario(userId) {
     if (!connected) return null;
     const cached = userCache.get(userId);
     if (cached && (Date.now() - cached.time < 30000)) return cached.data; // 30 seg cache
 
-    try {
-        const rs = await dbClient.execute({ sql: 'SELECT * FROM usuarios WHERE user_id = ?', args: [userId] });
-        let data = rs.rows.length > 0 ? rs.rows[0] : null;
-        if (!data) {
-            await dbClient.execute({
-                sql: 'INSERT INTO usuarios (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING',
-                args: [userId]
-            });
-            const created = await dbClient.execute({ sql: 'SELECT * FROM usuarios WHERE user_id = ?', args: [userId] });
-            data = created.rows[0] || null;
-        }
-        if (data) userCache.set(userId, { data, time: Date.now() });
-        return data;
-    } catch (e) { return null; }
+    if (inflightUsers.has(userId)) return inflightUsers.get(userId);
+
+    const p = (async () => {
+        try {
+            const rs = await dbClient.execute({ sql: 'SELECT * FROM usuarios WHERE user_id = ?', args: [userId] });
+            let data = rs.rows.length > 0 ? rs.rows[0] : null;
+            if (!data) {
+                await dbClient.execute({
+                    sql: 'INSERT INTO usuarios (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING',
+                    args: [userId]
+                });
+                const created = await dbClient.execute({ sql: 'SELECT * FROM usuarios WHERE user_id = ?', args: [userId] });
+                data = created.rows[0] || null;
+            }
+            if (data) userCache.set(userId, { data, time: Date.now() });
+            return data;
+        } catch (e) { return null; }
+        finally { inflightUsers.delete(userId); }
+    })();
+    inflightUsers.set(userId, p);
+    return p;
 }
 
 async function obtenerUsuariosBatch(userIds) {
@@ -1103,15 +1115,29 @@ async function limpiarSilenciados() {
 // --- Instancias vivas (diagnóstico de instancias duplicadas / error 440) ---
 // Cada proceso escribe su latido cada 30s. Si hay 2+ filas frescas, hay dos
 // procesos peleando la misma sesión de WhatsApp (440 Stream Errored).
-async function latirInstancia(id, servicio, commit, conectado) {
+async function latirInstancia(id, servicio, commit, conectado, publicUrl = '') {
     if (!connected) await init();
     if (!connected) return;
     try {
         await dbClient.execute({
-            sql: 'INSERT INTO bot_instancias (id, servicio, commit_sha, last_seen, conectado, uptime) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET servicio = excluded.servicio, commit_sha = excluded.commit_sha, last_seen = excluded.last_seen, conectado = excluded.conectado, uptime = excluded.uptime',
-            args: [id, servicio || '', commit || '', Date.now(), conectado ? 1 : 0, Math.round(process.uptime())]
+            sql: "INSERT INTO bot_instancias (id, servicio, commit_sha, last_seen, conectado, uptime, public_url) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET servicio = excluded.servicio, commit_sha = excluded.commit_sha, last_seen = excluded.last_seen, conectado = excluded.conectado, uptime = excluded.uptime, public_url = COALESCE(NULLIF(excluded.public_url, ''), bot_instancias.public_url)",
+            args: [id, servicio || '', commit || '', Date.now(), conectado ? 1 : 0, Math.round(process.uptime()), publicUrl || '']
         });
     } catch (e) {}
+}
+
+async function obtenerUrlServicio(ttlMs = 300000) {
+    if (!connected) await init();
+    if (!connected) return null;
+    try {
+        const rs = await dbClient.execute({
+            sql: "SELECT public_url FROM bot_instancias WHERE public_url IS NOT NULL AND public_url != '' AND last_seen > ? ORDER BY conectado DESC, last_seen DESC LIMIT 1",
+            args: [Date.now() - ttlMs]
+        });
+        if (rs.rows?.[0]?.public_url) return rs.rows[0].public_url;
+        const fallback = await dbClient.execute("SELECT public_url FROM bot_instancias WHERE public_url IS NOT NULL AND public_url != '' ORDER BY last_seen DESC LIMIT 1");
+        return fallback.rows?.[0]?.public_url || null;
+    } catch (e) { return null; }
 }
 
 async function instanciasActivas(ttlMs = 90000) {
@@ -1590,7 +1616,7 @@ module.exports = {
     sumarActividadBatch, topActivos, actividadPorChat, actividadDetalle, upsertSilenciado, silenciadosActivos, limpiarSilenciados,
     guardarSticker, obtenerSticker, misStickers, borrarSticker,
     setReglas, getReglas, borrarReglas,
-    latirInstancia, instanciasActivas, apagarInstancia, limpiarInstanciasViejas,
+    latirInstancia, obtenerUrlServicio, instanciasActivas, apagarInstancia, limpiarInstanciasViejas,
     crearRecordatorio, misRecordatorios, borrarRecordatorio, recordatoriosVencidos,
     getRecord, saveRecord,
     crearSubasta, obtenerSubastasActivas, pujarSubasta, finalizarSubasta, obtenerSubasta,

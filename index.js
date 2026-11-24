@@ -27,6 +27,8 @@ const { promisify } = require('util');
 const db = require('./database');
 const { useTursoAuthState } = require('./turso-auth');
 const { agregarExifSticker } = require('./utils/stickerExif');
+const { StickerPool } = require('./utils/stickerPool');
+const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto } = require('./utils/stickerProcessor');
 const handler = require('./commandHandler');
 const { handleGameResponse } = require('./gameResponder');
 const { handleMangaSession } = require('./mangaResponder');
@@ -61,13 +63,15 @@ function envInt(nombre, porDefecto, minimo = 0) {
     return Math.max(minimo, n);
 }
 const FAST_COMMANDS = new Set(['!ping']); // !menu excluido para respetar el filtro de manga mode
+const UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker']);
+const PUBLIC_RENDER_URL = process.env.RENDER_EXTERNAL_URL
+    || (process.env.RENDER_SERVICE_NAME ? `https://${process.env.RENDER_SERVICE_NAME}.onrender.com` : '');
 const PAIRING_CODE_TTL_MS = envInt('PAIRING_CODE_TTL_MS', 180000, 60000);
 const PAIRING_MIN_INTERVAL_MS = envInt('PAIRING_MIN_INTERVAL_MS', 180000, 60000);
 const PAIRING_RATE_LIMIT_BACKOFF_MS = envInt('PAIRING_RATE_LIMIT_BACKOFF_MS', 3600000, 300000);
 const PAIRING_METHOD = (process.env.PAIRING_METHOD || 'qr').toLowerCase();
 
-let FFMPEG_PATH = 'ffmpeg';
-try { FFMPEG_PATH = require('@ffmpeg-installer/ffmpeg').path; } catch (e) { }
+let FFMPEG_PATH = resolverFfmpeg();
 
 // Punto 4: Caché de Administradores para máximo rendimiento
 const adminCache = new Map();
@@ -157,7 +161,7 @@ const MAX_COLA = 30; // Máximo de tareas encoladas (aumentado para grupos activ
 const colaSalida = new Map(); // chatId -> { cola: [], procesando: bool }
 global.colaSalida = colaSalida; // Exponer para diagnósticos
 const slowChats = new Map(); // chatId -> timestamp hasta cuando se reducen envios extra
-const MAX_COLA_SALIDA = 50; // Límite máximo de mensajes en cola por chat
+const MAX_COLA_SALIDA = envInt('MAX_COLA_SALIDA', 200, 50); // Cola amplia para ráfagas sin descartar respuestas
 
 // Pausa base entre mensajes del mismo chat. 250ms fijos hacían que un comando
 // de 4 mensajes (!leer, !perfil) tardara 1s solo en esperas. Ahora la base es
@@ -235,7 +239,8 @@ async function procesarColaSalida(sock, chatId) {
         // Pausa entre mensajes: turbo si la cola está cargada, conservadora
         // (250ms) si este chat viene de un timeout/429, normal el resto.
         let delayMs;
-        if (estado.cola.length > 10) delayMs = 25;      // Modo turbo: cola colapsada
+        if (estado.cola.length > 25) delayMs = 15;      // Ráfaga masiva
+        else if (estado.cola.length > 10) delayMs = 25; // Modo turbo: cola cargada
         else if (estado.cola.length > 5) delayMs = 50;  // Normal
         else if (esChatLento(chatId)) delayMs = 250;    // Protección flood
         else delayMs = QUEUE_MIN_DELAY_MS;              // Base (80ms por defecto)
@@ -577,20 +582,28 @@ const TTL_CONFIG = 5 * 60 * 1000; // 5 minutos para caché de config
 const adminFetchAt = new Map();
 const ADMIN_FETCH_MIN_MS = 60 * 1000;
 
-// Helper para obtener configuración de grupo con caché LRU
+const inflightGroupConfig = new Map();
+
+// Helper para obtener configuración de grupo con caché LRU + single-flight
 async function obtenerConfigGrupo(chatId) {
     const cached = botState.groupCache.get(chatId);
     if (cached) return cached;
+    if (inflightGroupConfig.has(chatId)) return inflightGroupConfig.get(chatId);
 
-    try {
-        const active = await db.estaGrupoActivo(chatId);
-
-        const config = { active };
-        botState.groupCache.set(chatId, config);
-        return config;
-    } catch (e) {
-        return { active: null };
-    }
+    const p = (async () => {
+        try {
+            const active = await db.estaGrupoActivo(chatId);
+            const config = { active };
+            botState.groupCache.set(chatId, config);
+            return config;
+        } catch (e) {
+            return { active: null };
+        } finally {
+            inflightGroupConfig.delete(chatId);
+        }
+    })();
+    inflightGroupConfig.set(chatId, p);
+    return p;
 }
 
 // --- HELPERS DE TRADUCCION ---
@@ -807,6 +820,7 @@ function dashboardHandler(req, res) {
                 heapTotal: +(mem.heapTotal / 1048576).toFixed(1)
             },
             latencia: resumenLatencias(),
+            stickersPool: stickerPool.getStats(),
             queues
         });
         return;
@@ -851,7 +865,8 @@ async function resetAuthSession(reason = 'manual reset') {
     console.log(`[AUTH RESET] ${reason}`);
 }
 
-http.createServer(dashboardHandler).listen(PORT, '0.0.0.0', () => console.log(`🌐 Dashboard en puerto ${PORT}`));
+const httpServer = http.createServer(dashboardHandler).listen(PORT, '0.0.0.0', () => console.log(`🌐 Dashboard en puerto ${PORT}`));
+stickerPool.attachServer(httpServer);
 
 // AUTO-DESPERTADOR (anti-sleep de Render Free): Render duerme el servicio a
 // los 15 min sin tráfico entrante. Un ping interno cada 10 min cuenta como
@@ -874,47 +889,24 @@ const { esBufferAnimado, extParaBuffer, extraerAudioSticker } = require('./utils
 const { prepararAudioParaSticker } = require('./utils/stickerSonido');
 
 async function convertirAWebp(buffer, isVideo = false) {
-    // -threads acotado: en Render Free (0.1 vCPU) dejar que ffmpeg abra 8
-    // threads no acelera nada, solo le roba ciclos al event loop y hace que
-    // el resto de comandos "se arrastren" mientras convierte.
-    const intentar = async (comoVideo) => {
-        const ext = extParaBuffer(buffer, comoVideo);
-        const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const tmpIn = path.join(os.tmpdir(), `stk_in_${uid}.${ext}`);
-        const tmpOut = path.join(os.tmpdir(), `stk_out_${uid}.webp`);
-        fs.writeFileSync(tmpIn, buffer);
-        try {
-            const vf = 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white@0,format=yuva420p';
-            const args = comoVideo
-                ? ['-threads', '1', '-i', tmpIn, '-vf', vf.replace('lanczos','bilinear') + ',fps=8', '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', '-vsync', '0', '-t', '6', '-quality', '50', '-compression_level', '1', '-y', tmpOut]
-                : ['-threads', '2', '-i', tmpIn, '-vf', vf, '-quality', '75', '-compression_level', '4', '-y', tmpOut];
-            // Videos/GIFs en Render (CPU chica) suelen tardar más de 15s:
-            // timeout 30s para no matarlos a la mitad.
-            await execFileAsync(FFMPEG_PATH, args, { timeout: comoVideo ? 30000 : 15000, windowsHide: true });
-            return fs.readFileSync(tmpOut);
-        } finally {
-            try { fs.unlinkSync(tmpIn); } catch (e) { }
-            try { fs.unlinkSync(tmpOut); } catch (e) { }
-        }
-    };
-    // Se arranca directo por la ruta correcta según el contenido real del buffer.
-    const animado = isVideo || esBufferAnimado(buffer);
-    try {
-        const webp = await intentar(animado);
-        // Metadatos del pack (link del Discord) para todo sticker que crea el bot.
-        return await agregarExifSticker(webp);
-    } catch (e) {
-        // Respaldo: si falló y todavía no probamos la otra ruta, se prueba UNA vez.
-        try {
-            console.warn(`[Sticker] Reintentando como ${animado ? 'imagen' : 'animado'}:`, e.message);
-            const webp2 = await intentar(!animado);
-            return await agregarExifSticker(webp2);
-        } catch (e2) {
-            console.error('❌ [Sticker]', e2.message);
-            return null;
-        }
-    }
+    return convertirAWebpBuffer(buffer, isVideo, { ffmpegPath: FFMPEG_PATH });
 }
+
+// Pool combinado de stickers: usa workers PC conectados por WebSocket
+// cuando están disponibles (con fallback automático al worker local de Render).
+const stickerPool = new StickerPool({
+    maxLocal: envInt('MAX_STICKERS_LOCAL', envInt('MAX_PROCESOS', 2, 1), 1),
+    maxQueue: envInt('MAX_COLA_STICKERS', 200, 20),
+    workerJobTimeoutMs: envInt('WORKER_JOB_TIMEOUT_MS', 45000, 10000),
+    localRunner: ({ buffer, esVideo, necesitaAudio, audioBuffer }) => procesarStickerCompleto({
+        buffer,
+        esVideo,
+        necesitaAudio,
+        audioBuffer,
+        ffmpegPath: FFMPEG_PATH,
+        parallelAudio: false // En Render 512MB corre secuencial para evitar picos OOM
+    })
+});
 
 // ============================================================
 //                     BOT PRINCIPAL
@@ -987,10 +979,10 @@ async function startBot() {
     const SERVICIO_RENDER = process.env.RENDER_SERVICE_ID || os.hostname();
     const COMMIT_DESPLEGADO = process.env.RENDER_GIT_COMMIT || '(local)';
     onceInterval('latido-instancia', () => {
-        db.latirInstancia(botState.instanceId, SERVICIO_RENDER, COMMIT_DESPLEGADO, botState.isConnected).catch(() => { });
+        db.latirInstancia(botState.instanceId, SERVICIO_RENDER, COMMIT_DESPLEGADO, botState.isConnected, PUBLIC_RENDER_URL).catch(() => { });
     }, 30000);
     db.limpiarInstanciasViejas().catch(() => { });
-    await db.latirInstancia(botState.instanceId, SERVICIO_RENDER, COMMIT_DESPLEGADO, false).catch(() => { });
+    await db.latirInstancia(botState.instanceId, SERVICIO_RENDER, COMMIT_DESPLEGADO, false, PUBLIC_RENDER_URL).catch(() => { });
 
     // CANDADO DE INSTANCIA ÚNICA: si hay otra instancia viva (latido < 45 s)
     // con esta misma sesión, NO abrir el socket de WhatsApp. Dos procesos con
@@ -1271,7 +1263,7 @@ async function startBot() {
     const TTL_DEDUP_MS = 2 * 60 * 1000; // 2 minutos es de sobra para cualquier reenvio
 
     // Semáforo de mensajes en vuelo (ver PROCESAMIENTO CONCURRENTE más abajo).
-    const MAX_MSG_CONCURRENT = envInt('PERF_MAX_MSG_CONCURRENT', 16, 4);
+    const MAX_MSG_CONCURRENT = envInt('PERF_MAX_MSG_CONCURRENT', 32, 8);
     let mensajesEnVuelo = 0;
     const esperaSlotMensaje = [];
     function adquirirSlotMensaje() {
@@ -1420,6 +1412,7 @@ async function startBot() {
             else if (tipo === 'extendedTextMessage') texto = msg.message.extendedTextMessage?.text || '';
             else if (tipo === 'imageMessage') texto = msg.message.imageMessage?.caption || '';
             else if (tipo === 'videoMessage') texto = msg.message.videoMessage?.caption || '';
+            else if (tipo === 'documentMessage') texto = msg.message.documentMessage?.caption || '';
 
             // Ignorar lo que sale del propio teléfono vinculado (fromMe), SALVO
             // comandos: el dueño suele probar el bot desde ese mismo celular y
@@ -1469,20 +1462,19 @@ async function startBot() {
             );
 
             if (!isCommand && !participaEnJuego && !isMentioned) continue;
-            // PROCESAMIENTO CONCURRENTE (con tope): un pico de mensajes ya no
-            // dispara cientos de handlers a la vez pidiéndole RAM y queries a
-            // Turso al mismo tiempo (era la forma más fácil de llegar a OOM en
-            // 512MB). Solo frena bajo sobrecarga real; en uso normal el tope
-            // nunca se toca, así que no agrega espera perceptible.
+            // Carril independiente para !s / !sticker: su concurrencia ya está
+            // regulada por stickerPool (PC + Render). No debe ocupar slots de
+            // adquirirSlotMensaje() para no frenar !ping/!menu/juegos bajo ráfagas.
+            const esStickerCmd = /^!(s|sticker)(\s|$)/i.test(texto.trim());
             (async () => {
-                await adquirirSlotMensaje();
+                if (!esStickerCmd) await adquirirSlotMensaje();
                 try {
                     await procesarMensaje(sock, msg);
                     botState.msgCount++;
                 } catch (e) {
                     console.error('❌ Error procesando mensaje:', e.message);
                 } finally {
-                    liberarSlotMensaje();
+                    if (!esStickerCmd) liberarSlotMensaje();
                 }
             })();
         }
@@ -1603,6 +1595,7 @@ async function procesarMensaje(sock, msg) {
         else if (msgType === 'extendedTextMessage') txt = msg.message.extendedTextMessage?.text || '';
         else if (msgType === 'imageMessage') txt = msg.message.imageMessage?.caption || '';
         else if (msgType === 'videoMessage') txt = msg.message.videoMessage?.caption || '';
+        else if (msgType === 'documentMessage') txt = msg.message.documentMessage?.caption || '';
         const pushName = msg.pushName || '';
 
         const cleanTxt = txt.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[.,]$/, "");
@@ -1734,10 +1727,16 @@ async function procesarMensaje(sock, msg) {
                 if (ahora - lastFetch >= ADMIN_FETCH_MIN_MS) {
                     adminFetchAt.set(chatId, ahora);
                     try {
-                        const metadata = await Promise.race([
-                            sock.groupMetadata(chatId),
-                            new Promise((_, rej) => setTimeout(() => rej(new Error('admin-timeout')), 5000))
-                        ]);
+                        if (!globalThis.__inflightAdminMeta) globalThis.__inflightAdminMeta = new Map();
+                        let pMeta = globalThis.__inflightAdminMeta.get(chatId);
+                        if (!pMeta) {
+                            pMeta = Promise.race([
+                                sock.groupMetadata(chatId),
+                                new Promise((_, rej) => setTimeout(() => rej(new Error('admin-timeout')), 5000))
+                            ]).finally(() => globalThis.__inflightAdminMeta.delete(chatId));
+                            globalThis.__inflightAdminMeta.set(chatId, pMeta);
+                        }
+                        const metadata = await pMeta;
                         lista = adminsDe(metadata.participants);
                         botState.adminCache.set(chatId, { admins: lista, time: Date.now() });
                     } catch (e) { /* timeout/red: se usa el caché viejo abajo */ }
@@ -1791,10 +1790,13 @@ async function procesarMensaje(sock, msg) {
             // el mismo mensaje, o eco duplicado de WhatsApp). No es castigo:
             // un humano casi nunca repite el comando idéntico en 5 segundos.
             if (!globalThis.__dupCmd) globalThis.__dupCmd = new Map();
-            const dupKey = `${sender}|${chatId}|${start}|${txt}|${quotedMsgId || ''}`;
+            const esStickerIlimitado = UNLIMITED_STICKER_CMDS.has(start);
+            const tieneMediaPropia = msgType === 'imageMessage' || msgType === 'videoMessage' || msgType === 'documentMessage';
+            const dupId = (esStickerIlimitado || tieneMediaPropia) ? `|${msg.key?.id || ''}` : '';
+            const dupKey = `${sender}|${chatId}|${start}|${txt}|${quotedMsgId || ''}${dupId}`;
             const ahoraDup = Date.now();
             const ultimoDup = globalThis.__dupCmd.get(dupKey) || 0;
-            if (ahoraDup - ultimoDup < 5000) {
+            if (!esStickerIlimitado && ahoraDup - ultimoDup < 5000) {
                 if (VERBOSE_LOGS) console.log(`[DUP] ${start} duplicado (<5s), se ignora.`);
                 return;
             }
@@ -1864,9 +1866,8 @@ async function procesarMensaje(sock, msg) {
             }
 
             // --- COOLDOWN GLOBAL (anti-spam / anti rate-limit de WhatsApp) ---
-            // Admins: sin límite (la cola de salida protege el rate-limit)
-            // Usuarios: 300ms mínimo entre comandos (balance entre velocidad y protección)
-            const cooldownMs = isAdmin ? 0 : 300;
+            // Admins y !s/!sticker: sin cooldown global
+            const cooldownMs = (isAdmin || esStickerIlimitado) ? 0 : 300;
             if (cooldownMs > 0) {
                 const globalWait = verificarCooldown(sender, 'global', cooldownMs);
                 if (globalWait > 0) {
@@ -1902,9 +1903,9 @@ async function procesarMensaje(sock, msg) {
                     }
                 }
 
-                // Multimedia pesados: 8 seg para usuarios normales
+                // Multimedia pesados: 8 seg para usuarios normales (!s / !sticker libres sin cooldown)
                 if (!isAdmin) {
-                    const heavyCmds = ['!v', '!s', '!sticker', '!trace', '!top', '!waifu', '!kill', '!slap', '!punch', '!toimg'];
+                    const heavyCmds = ['!v', '!trace', '!top', '!waifu', '!kill', '!slap', '!punch', '!toimg'];
                     if (heavyCmds.includes(start)) {
                         const wait = verificarCooldown(sender, start, 8000);
                         if (wait > 0) return sock.sendMessage(chatId, { text: `⏳ Espera ${wait}s para volver a usar *${start}*.` }, { quoted: msg });
@@ -1936,8 +1937,9 @@ async function procesarMensaje(sock, msg) {
                 batchActualizarRacha(sender);
 
                 // --- SISTEMA ANTI-SPAM (NUEVO - PER GRUPO) ---
+                // !s y !sticker quedan exentos para poder crear stickers sin límite
                 const isAntiSpamActivo = groupConf ? groupConf.antispam === 1 : botState.antiSpam.active;
-                if (isAntiSpamActivo && !isAdmin) {
+                if (isAntiSpamActivo && !isAdmin && !esStickerIlimitado) {
                     const ahora = Date.now();
                     let stats = botState.antiSpam.tracker.get(sender);
 
@@ -2070,16 +2072,16 @@ async function procesarMensaje(sock, msg) {
                     start, cmd, txt, args, sender, pushName, isGroup, isAdmin, isGlobalAdmin,
                     botState, db, delay, FFMPEG_PATH, ADMIN_NUM,
                     traducirConCache, convertirAWebp, extraerAudioSticker, prepararAudioParaSticker, downloadMediaMessage,
+                    stickerPool,
                     quotedMsgId, quotedParticipant, msgType,
                     sockOriginal: sock // Para comandos express que necesitan bypass de cola
                 };
 
                 // isHeavy: comandos que usan FFmpeg o descargas pesadas y por tanto deben
-                // respetar el limite de procesos concurrentes (esperarSlotHeavy). Se agregaron
-                // las reacciones sociales (usan FFmpeg para convertir GIF->MP4) y !waifus
-                // (descarga hasta 10 imagenes), que antes evadian este limite en Render.
+                // respetar el limite de procesos concurrentes (esperarSlotHeavy).
+                // !s y !sticker ya no usan esta cola: van directo por stickerPool (PC + Render).
                 const isHeavy = [
-                    '!v', '!s', '!sticker', '!trace', '!toimg',
+                    '!v', '!trace', '!toimg',
                     '!pat', '!hug', '!kill', '!kiss', '!slap', '!punch', '!cry', '!dance', '!bite', '!highfive',
                     '!fumar', '!cafe', '!puchero', '!sonrojar', '!baka', '!dormir', '!comiendo', '!pensar',
                     '!patear', '!celebrar', '!aburrido', '!risa', '!smug', '!stare',
@@ -2141,6 +2143,7 @@ async function apagar(motivo) {
     if (cerrando) return;
     cerrando = true;
     console.log(`🛑 [Shutdown] Guardando datos... (${motivo})`);
+    try { stickerPool.close(); } catch (e) { }
     // Avisar ya que esta instancia se apaga: su latido desaparece al instante
     // y el reinicio (deploy) de otro servicio no espera un latido de un
     // proceso que ya murió.

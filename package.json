@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "worker": "node worker-pc.js",
     "test": "node scripts/smoke-test.js",
     "test-stickers": "node scripts/test-sticker-audio.js",
     "test-db": "node test-turso.js",

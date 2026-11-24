@@ -243,7 +243,7 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
     const tmpIn = path.join(os.tmpdir(), `stk_info_in_${uid}.bin`);
     const tmpOgg = path.join(os.tmpdir(), `stk_info_out_${uid}.ogg`);
     const tmpPcm = path.join(os.tmpdir(), `stk_info_out_${uid}.pcm`);
-    fs.writeFileSync(tmpIn, buffer);
+    await fs.promises.writeFile(tmpIn, buffer);
     let ogg = null;
     try {
         await execFileAsync(ffmpegPath, [
@@ -260,8 +260,11 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
             '-t', String(tope), '-y', tmpPcm
         ], { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024 });
 
-        ogg = fs.readFileSync(tmpOgg);
-        const pcm = fs.readFileSync(tmpPcm);
+        const [oggRead, pcm] = await Promise.all([
+            fs.promises.readFile(tmpOgg),
+            fs.promises.readFile(tmpPcm)
+        ]);
+        ogg = oggRead;
         const waveform = calcularWaveformDesdePcm(pcm);
         if (!validarOggOpus(ogg) || !waveform) {
             if (ogg && ogg.length) console.warn(`[STICKER-SONIDO] Pista de audio sin frames reproducibles (${ogg.length}B ogg, ${pcm.length}B pcm); se envía sticker normal.`);
@@ -276,9 +279,11 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
         if (ogg && ogg.length) console.warn('[STICKER-SONIDO] prepararAudioParaSticker falló:', e.message);
         return null;
     } finally {
-        try { fs.unlinkSync(tmpIn); } catch (e) { }
-        try { fs.unlinkSync(tmpOgg); } catch (e) { }
-        try { fs.unlinkSync(tmpPcm); } catch (e) { }
+        await Promise.all([
+            fs.promises.unlink(tmpIn).catch(() => { }),
+            fs.promises.unlink(tmpOgg).catch(() => { }),
+            fs.promises.unlink(tmpPcm).catch(() => { })
+        ]);
     }
 }
 
