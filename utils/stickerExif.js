@@ -11,8 +11,12 @@
  * el metadato. Nunca tumba el envío.
  */
 
-const LINK_DISCORD = 'discord.gg/bJVq2seCJe';
-const NOMBRE_PACK = 'Diky Bot';
+const LINK_GRUPO_WA = 'https://chat.whatsapp.com/FnlDPohM4J9F4M8ebaaXgT';
+const LINK_DISCORD = 'https://discord.gg/bJVq2seCJe';
+// Exactamente como lo pidió el usuario: línea 1 el grupo de WhatsApp,
+// línea 2 (otra línea, abajo) el link de Discord.
+const NOMBRE_PACK = `grupo de whasap: ${LINK_GRUPO_WA}`;
+const AUTOR_PACK = `link de discord: ${LINK_DISCORD}`;
 
 let ImageWebp = null;
 function getImage() {
@@ -46,7 +50,7 @@ function construirExif(pack, autor) {
  * Agrega el pack y el autor al webp. Devuelve el buffer con EXIF, o el
  * original si no se pudo (webp inválido, librería ausente, error).
  */
-async function agregarExifSticker(webp, pack = NOMBRE_PACK, autor = LINK_DISCORD) {
+async function agregarExifSticker(webp, pack = NOMBRE_PACK, autor = AUTOR_PACK) {
     try {
         if (!webp || webp.length < 12) return webp;
         if (webp.slice(0, 4).toString('ascii') !== 'RIFF') return webp;
@@ -61,4 +65,4 @@ async function agregarExifSticker(webp, pack = NOMBRE_PACK, autor = LINK_DISCORD
     }
 }
 
-module.exports = { agregarExifSticker, construirExif, LINK_DISCORD, NOMBRE_PACK };
+module.exports = { agregarExifSticker, construirExif, LINK_DISCORD, LINK_GRUPO_WA, NOMBRE_PACK, AUTOR_PACK };
