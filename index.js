@@ -865,21 +865,6 @@ async function resetAuthSession(reason = 'manual reset') {
     console.log(`[AUTH RESET] ${reason}`);
 }
 
-const httpServer = http.createServer(dashboardHandler).listen(PORT, '0.0.0.0', () => console.log(`🌐 Dashboard en puerto ${PORT}`));
-stickerPool.attachServer(httpServer);
-
-// AUTO-DESPERTADOR (anti-sleep de Render Free): Render duerme el servicio a
-// los 15 min sin tráfico entrante. Un ping interno cada 10 min cuenta como
-// tráfico y lo mantiene despierto 24/7 (~720 h/mes < 750 h del plan Free,
-// SIEMPRE que exista UNA sola instancia en la cuenta). No afecta a los
-// usuarios: es una request interna al propio /health.
-if (process.env.RENDER_EXTERNAL_URL) {
-    onceInterval('ping-antisleep', () => {
-        fetch(`${process.env.RENDER_EXTERNAL_URL}/health`).catch(() => { });
-    }, 10 * 60 * 1000);
-    console.log(`⏰ Anti-sleep activo: ping cada 10 min a ${process.env.RENDER_EXTERNAL_URL}/health`);
-}
-
 // ============================================================
 //                     STICKER UTILS
 // ============================================================
@@ -907,6 +892,21 @@ const stickerPool = new StickerPool({
         parallelAudio: false // En Render 512MB corre secuencial para evitar picos OOM
     })
 });
+
+const httpServer = http.createServer(dashboardHandler).listen(PORT, '0.0.0.0', () => console.log(`🌐 Dashboard en puerto ${PORT}`));
+stickerPool.attachServer(httpServer);
+
+// AUTO-DESPERTADOR (anti-sleep de Render Free): Render duerme el servicio a
+// los 15 min sin tráfico entrante. Un ping interno cada 10 min cuenta como
+// tráfico y lo mantiene despierto 24/7 (~720 h/mes < 750 h del plan Free,
+// SIEMPRE que exista UNA sola instancia en la cuenta). No afecta a los
+// usuarios: es una request interna al propio /health.
+if (process.env.RENDER_EXTERNAL_URL) {
+    onceInterval('ping-antisleep', () => {
+        fetch(`${process.env.RENDER_EXTERNAL_URL}/health`).catch(() => { });
+    }, 10 * 60 * 1000);
+    console.log(`⏰ Anti-sleep activo: ping cada 10 min a ${process.env.RENDER_EXTERNAL_URL}/health`);
+}
 
 // ============================================================
 //                     BOT PRINCIPAL

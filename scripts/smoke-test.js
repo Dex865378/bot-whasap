@@ -83,5 +83,59 @@ check(typeof handler.handleCommand === 'function', 'handleCommand exportado');
 // 6. music.js eliminado (era stub vacío que el loader ignoraba)
 check(!fs.existsSync(path.join(ROOT, 'commands', 'music.js')), 'commands/music.js eliminado');
 
+// 7. Arranque top-level de index.js sin errores síncronos/TDZ (sin abrir WhatsApp ni Turso real)
+try {
+    const Module = require('module');
+    const origLoad = Module._load;
+    const fakeSock = {
+        ev: { on: () => {} },
+        user: { id: '0@s.whatsapp.net' },
+        sendMessage: async () => ({}),
+        end: () => {}
+    };
+    Module._load = function (request, parent, isMain) {
+        if (request === '@whiskeysockets/baileys') {
+            return {
+                default: () => fakeSock,
+                useMultiFileAuthState: async () => ({ state: { creds: {}, keys: {} }, saveCreds: async () => {} }),
+                DisconnectReason: {},
+                delay: async () => {},
+                downloadMediaMessage: async () => Buffer.alloc(0),
+                getContentType: () => null,
+                fetchLatestBaileysVersion: async () => ({ version: [2, 3000, 0] }),
+                Browsers: { ubuntu: () => ['Ubuntu', 'Chrome', '1.0'] },
+                proto: { Message: { encode: () => ({ finish: () => Buffer.alloc(0) }), decode: () => ({}), AudioMessage: { encode: () => ({ finish: () => Buffer.alloc(0) }), decode: () => ({}) }, StickerMessage: { encode: () => ({ finish: () => Buffer.alloc(0) }), decode: () => ({}) } } },
+                prepareWAMessageMedia: async () => ({}),
+                generateWAMessageFromContent: () => ({}),
+                getMediaKeys: async () => ({ iv: Buffer.alloc(16), macKey: Buffer.alloc(32) })
+            };
+        }
+        if (request === './database' || request.endsWith('\\database') || request.endsWith('/database')) {
+            return new Proxy({
+                init: async () => false,
+                isConnected: () => false,
+                instanciasActivas: async () => [],
+                latirInstancia: async () => {},
+                silenciadosActivos: async () => [],
+                limpiarSilenciados: async () => {},
+                limpiarInstanciasViejas: async () => {},
+                apagarInstancia: async () => {},
+                obtenerSubastasActivas: async () => [],
+                recordatoriosVencidos: async () => []
+            }, {
+                get(t, p) { return p in t ? t[p] : async () => null; }
+            });
+        }
+        return origLoad.call(this, request, parent, isMain);
+    };
+    process.env.PORT = '0';
+    delete process.env.RENDER_EXTERNAL_URL;
+    require(path.join(ROOT, 'index.js'));
+    Module._load = origLoad;
+    check(true, 'Arranque top-level de index.js sin errores');
+} catch (e) {
+    check(false, `Arranque top-level de index.js sin errores: ${e.message}`);
+}
+
 console.log(fallos === 0 ? '\n🎉 SMOKE TEST OK' : `\n💥 SMOKE TEST: ${fallos} fallo(s)`);
 process.exit(fallos === 0 ? 0 : 1);
