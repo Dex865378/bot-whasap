@@ -287,6 +287,131 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
     }
 }
 
+async function subirYArmarSticker({
+    sticker,
+    audio = null,
+    upload,
+    logger,
+    mediaUploadTimeoutMs = 30000,
+    parallelUpload = false
+}) {
+    if (!sticker || !upload) return null;
+    const audioInfo = audio
+        ? (Buffer.isBuffer(audio) ? { buffer: audio, segundos: 0, waveform: null } : audio)
+        : null;
+    const conAudio = !!(audioInfo && audioInfo.buffer && audioInfo.buffer.length);
+
+    const encCapturado = new Map();
+    const opciones = {
+        upload: async (filePath, meta) => {
+            if (meta?.fileEncSha256B64) {
+                const encBuf = await esperarArchivoCifrado(filePath, meta.fileEncSha256B64);
+                if (meta.mediaType) encCapturado.set(meta.mediaType, encBuf);
+            }
+            return upload(filePath, meta);
+        },
+        logger,
+        mediaUploadTimeoutMs
+    };
+
+    const seg = conAudio ? Math.max(1, Math.min(10, Math.round(Number(audioInfo.segundos) || 3))) : 0;
+
+    let stickerMedia, audioMedia;
+    if (conAudio && parallelUpload) {
+        [stickerMedia, audioMedia] = await Promise.all([
+            prepareWAMessageMedia({ sticker }, opciones),
+            prepareWAMessageMedia({
+                audio: audioInfo.buffer,
+                ptt: true,
+                mimetype: 'audio/ogg; codecs=opus',
+                seconds: seg
+            }, opciones)
+        ]);
+    } else {
+        // Secuencial cuando depende de refreshMediaConn inicial en Render.
+        stickerMedia = await prepareWAMessageMedia({ sticker }, opciones);
+        if (conAudio) {
+            audioMedia = await prepareWAMessageMedia({
+                audio: audioInfo.buffer,
+                ptt: true,
+                mimetype: 'audio/ogg; codecs=opus',
+                seconds: seg
+            }, opciones);
+        }
+    }
+
+    if (!stickerMedia?.stickerMessage) return null;
+    const stickerMsg = stickerMedia.stickerMessage;
+    const dims = dimensionesWebp(sticker);
+    stickerMsg.width = stickerMsg.width || dims.width;
+    stickerMsg.height = stickerMsg.height || dims.height;
+    if (typeof stickerMsg.isAnimated !== 'boolean') stickerMsg.isAnimated = esWebpAnimado(sticker);
+    stickerMsg.stickerSentTs = stickerMsg.stickerSentTs || Date.now();
+
+    if (conAudio) {
+        if (!audioMedia?.audioMessage) return null;
+        if (!audioMedia.audioMessage.url && !audioMedia.audioMessage.directPath) return null;
+        const audioMsg = audioMedia.audioMessage;
+        audioMsg.seconds = seg;
+        if (audioInfo.waveform && audioInfo.waveform.length) {
+            audioMsg.waveform = audioInfo.waveform;
+        }
+        const encAudio = encCapturado.get('audio');
+        if (audioMsg.mediaKey && encAudio) {
+            const sidecar = await calcularStreamingSidecar(audioMsg.mediaKey, encAudio, 'audio');
+            if (sidecar && sidecar.length) audioMsg.streamingSidecar = sidecar;
+        }
+        stickerMsg.audioMessage = audioMsg;
+    }
+
+    return stickerMsg;
+}
+
+async function enviarStickerPreSubido(sock, jid, stickerMsgOrBytes, quoted) {
+    if (!sock || !stickerMsgOrBytes) return null;
+    parchearProtoSonido();
+    const stickerMsg = Buffer.isBuffer(stickerMsgOrBytes)
+        ? proto.Message.StickerMessage.decode(stickerMsgOrBytes)
+        : stickerMsgOrBytes;
+    if (!stickerMsg || (!stickerMsg.url && !stickerMsg.directPath)) return null;
+
+    const savedAudio = stickerMsg.audioMessage || null;
+    const waMsg = generateWAMessageFromContent(jid, {
+        stickerMessage: {
+            ...stickerMsg,
+            ...(savedAudio ? { audioMessage: savedAudio } : {})
+        }
+    }, {
+        userJid: sock.user?.id,
+        quoted: quoted || undefined
+    });
+
+    if (!waMsg?.message?.stickerMessage) return null;
+    if (savedAudio) waMsg.message.stickerMessage.audioMessage = savedAudio;
+
+    const enviarOnce = () => {
+        let timer;
+        return Promise.race([
+            sock.relayMessage(jid, waMsg.message, { messageId: waMsg.key.id }),
+            new Promise((_, rej) => {
+                timer = setTimeout(() => rej(new Error('relayMessage timeout')), RELAY_TIMEOUT_MS);
+            })
+        ]).finally(() => clearTimeout(timer));
+    };
+
+    try {
+        await enviarOnce();
+    } catch (e) {
+        if (e?.data === 429 || String(e?.message || '').includes('rate-overlimit')) {
+            await new Promise(r => setTimeout(r, 1000));
+            await enviarOnce();
+        } else {
+            throw e;
+        }
+    }
+    return waMsg;
+}
+
 /**
  * Sube el sticker y el audio, arma el mensaje y lo manda por relayMessage.
  * Devuelve el WAMessage enviado, o null si no se pudo (para que el caller
@@ -298,77 +423,14 @@ async function enviarStickerConSonido(sock, jid, sticker, audio, quoted, ffmpegP
     const audioInfo = Buffer.isBuffer(audio) ? { buffer: audio, segundos: 0, waveform: null } : audio;
     if (!audioInfo.buffer || !audioInfo.buffer.length) return null;
     try {
-        const encCapturado = new Map();
-        const opciones = {
-            upload: async (filePath, meta) => {
-                if (meta?.fileEncSha256B64) {
-                    const encBuf = await esperarArchivoCifrado(filePath, meta.fileEncSha256B64);
-                    if (meta.mediaType) encCapturado.set(meta.mediaType, encBuf);
-                }
-                return sock.waUploadToServer(filePath, meta);
-            },
-            logger: sock.logger,
-            mediaUploadTimeoutMs: 30000
-        };
-
-        const seg = Math.max(1, Math.min(10, Math.round(Number(audioInfo.segundos) || 3)));
-
-        // Secuencial a propósito: evita competir por refresh de mediaConn.
-        const stickerMedia = await prepareWAMessageMedia({ sticker }, opciones);
-        const audioMedia = await prepareWAMessageMedia({
-            audio: audioInfo.buffer,
-            ptt: true,
-            mimetype: 'audio/ogg; codecs=opus',
-            seconds: seg
-        }, opciones);
-
-        if (!stickerMedia?.stickerMessage || !audioMedia?.audioMessage) return null;
-        if (!audioMedia.audioMessage.url && !audioMedia.audioMessage.directPath) return null;
-
-        const stickerMsg = stickerMedia.stickerMessage;
-        const dims = dimensionesWebp(sticker);
-        stickerMsg.width = stickerMsg.width || dims.width;
-        stickerMsg.height = stickerMsg.height || dims.height;
-        if (typeof stickerMsg.isAnimated !== 'boolean') stickerMsg.isAnimated = esWebpAnimado(sticker);
-        stickerMsg.stickerSentTs = stickerMsg.stickerSentTs || Date.now();
-
-        const audioMsg = audioMedia.audioMessage;
-        audioMsg.seconds = seg;
-        if (audioInfo.waveform && audioInfo.waveform.length) {
-            audioMsg.waveform = audioInfo.waveform;
-        }
-        const encAudio = encCapturado.get('audio');
-        if (audioMsg.mediaKey && encAudio) {
-            const sidecar = await calcularStreamingSidecar(audioMsg.mediaKey, encAudio, 'audio');
-            if (sidecar && sidecar.length) audioMsg.streamingSidecar = sidecar;
-        }
-
-        const waMsg = generateWAMessageFromContent(jid, {
-            stickerMessage: {
-                ...stickerMsg,
-                audioMessage: audioMsg
-            }
-        }, {
-            userJid: sock.user?.id,
-            quoted: quoted || undefined
+        const stickerMsg = await subirYArmarSticker({
+            sticker,
+            audio: audioInfo,
+            upload: (filePath, meta) => sock.waUploadToServer(filePath, meta),
+            logger: sock.logger
         });
-
-        if (!waMsg?.message?.stickerMessage) return null;
-
-        waMsg.message.stickerMessage.audioMessage = audioMsg;
-
-        let timer;
-        try {
-            await Promise.race([
-                sock.relayMessage(jid, waMsg.message, { messageId: waMsg.key.id }),
-                new Promise((_, rej) => {
-                    timer = setTimeout(() => rej(new Error('relayMessage timeout')), RELAY_TIMEOUT_MS);
-                })
-            ]);
-        } finally {
-            clearTimeout(timer);
-        }
-        return waMsg;
+        if (!stickerMsg) return null;
+        return await enviarStickerPreSubido(sock, jid, stickerMsg, quoted);
     } catch (e) {
         console.warn('[STICKER-SONIDO] No se pudo mandar con audio:', e.message);
         return null;
@@ -377,6 +439,9 @@ async function enviarStickerConSonido(sock, jid, sticker, audio, quoted, ffmpegP
 
 module.exports = {
     enviarStickerConSonido,
+    subirYArmarSticker,
+    enviarStickerPreSubido,
+    esperarArchivoCifrado,
     prepararAudioParaSticker,
     parchearProtoSonido,
     validarOggOpus,

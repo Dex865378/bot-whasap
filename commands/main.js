@@ -5,8 +5,18 @@ const { helpData } = require('./help');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { proto } = require('@whiskeysockets/baileys');
 const { esWebpAnimado, primerFrameWebp } = require('../utils/media');
-const { enviarStickerConSonido } = require('../utils/stickerSonido');
+const { enviarStickerConSonido, enviarStickerPreSubido } = require('../utils/stickerSonido');
+
+function serializarMediaProto(mediaObj, tipoClave) {
+    try {
+        if (!mediaObj || (!mediaObj.url && !mediaObj.directPath) || !mediaObj.mediaKey) return null;
+        return Buffer.from(proto.Message.encode(proto.Message.create({ [tipoClave]: mediaObj })).finish());
+    } catch (_) {
+        return null;
+    }
+}
 
 // Portada del menú: configurada con !setportada menu (cacheada en RAM por
 // db.getPortada) o la imagen por defecto del bot. Así el menú sale como UN
@@ -46,7 +56,7 @@ module.exports = {
     name: 'main',
     isMultiple: true,
     names: ['!menu', '!menu2', '!help', '!s', '!sticker', '!toimg'],
-    async execute(sock, chatId, msg, args, { start, cmd, txt, isGroup, sender, pushName, downloadMediaMessage, convertirAWebp, extraerAudioSticker, prepararAudioParaSticker, stickerPool, FFMPEG_PATH, botState, db }) {
+    async execute(sock, chatId, msg, args, { start, cmd, txt, isGroup, sender, pushName, downloadMediaMessage, convertirAWebp, extraerAudioSticker, prepararAudioParaSticker, stickerPool, limpiarCachePostSticker, getMediaConn, sockOriginal, FFMPEG_PATH, botState, db }) {
 
         // !ping esta manejado por commands/ping.js (mide latencia real con timestamp).
         // Se elimino la version duplicada de aqui, que nunca se ejecutaba (ping.js
@@ -573,11 +583,22 @@ module.exports = {
                 let audio = null;
 
                 if (stickerPool) {
+                    const mediaClave = esVideo
+                        ? ((media === msg.message?.documentMessage || media === citada?.documentMessage) ? 'documentMessage' : 'videoMessage')
+                        : ((media === msg.message?.documentMessage || media === citada?.documentMessage) ? 'documentMessage' : 'imageMessage');
+                    const mediaProtoBytes = serializarMediaProto(media, mediaClave);
+                    const audioProtoBytes = (!esVideo && audioCitado)
+                        ? serializarMediaProto(audioCitado, audioCitado === citada?.audioMessage ? 'audioMessage' : 'documentMessage')
+                        : null;
+
                     const res = await stickerPool.procesarSticker({
                         descargarMedia: () => descargarConTimeout(downloadMediaMessage, entradaMedia),
                         descargarAudioCitado: (!esVideo && audioCitado)
                             ? () => descargarConTimeout(downloadMediaMessage, { key: msg.key, message: citada })
                             : null,
+                        mediaProtoBytes,
+                        audioProtoBytes,
+                        getMediaConn,
                         esVideo,
                         necesitaAudio,
                         fallbackConvertir: convertirAWebp,
@@ -593,6 +614,14 @@ module.exports = {
                     }
                     if (res.tooLarge) {
                         return sock.sendMessage(chatId, { text: '⚠️ *Archivo muy pesado* (más de 15MB).\nManda un video más corto o una imagen más liviana.' }, { quoted: msg });
+                    }
+                    if (res.preuploadedStickerMsg) {
+                        const envio = await enviarStickerPreSubido(sockOriginal || sock, chatId, res.preuploadedStickerMsg, msg);
+                        if (envio) {
+                            console.log(`[STICKER] Enviado via PC directo (Render solo relayMessage).`);
+                            return;
+                        }
+                        throw new Error('No se pudo reenviar sticker pre-subido por relayMessage');
                     }
                     stiker = res.stiker;
                     audio = res.audio;
@@ -642,6 +671,10 @@ module.exports = {
             } catch (e) {
                 console.error('[STICKER] Error:', e.message);
                 return sock.sendMessage(chatId, { text: '❌ Error al crear sticker.' });
+            } finally {
+                if (typeof limpiarCachePostSticker === 'function') {
+                    Promise.resolve(limpiarCachePostSticker()).catch(() => { });
+                }
             }
         }
 

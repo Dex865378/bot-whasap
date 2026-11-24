@@ -28,7 +28,7 @@ const db = require('./database');
 const { useTursoAuthState } = require('./turso-auth');
 const { agregarExifSticker } = require('./utils/stickerExif');
 const { StickerPool } = require('./utils/stickerPool');
-const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto } = require('./utils/stickerProcessor');
+const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto, limpiarTemporalesStickers } = require('./utils/stickerProcessor');
 const handler = require('./commandHandler');
 const { handleGameResponse } = require('./gameResponder');
 const { handleMangaSession } = require('./mangaResponder');
@@ -85,23 +85,8 @@ const cooldowns = new Map(); // ESCUDO ANTI-SPAM
 const nombreWaSync = new Map(); // sender -> timestamp del último chequeo
 const NOMBRE_WA_TTL_MS = 10 * 60 * 1000;
 
-// 🧹 Limpieza de cooldowns caducados cada 10 minutos (anti memory-leak)
-setInterval(() => {
-    const ahora = Date.now();
-    const TTL_COOLDOWN = 5 * 60 * 1000; // 5 minutos = bien pasado cualquier cooldown
-    let eliminados = 0;
-    for (const [key, ts] of cooldowns.entries()) {
-        if (ahora - ts > TTL_COOLDOWN) { cooldowns.delete(key); eliminados++; }
-    }
-    if (eliminados > 0 && VERBOSE_LOGS) console.log(`[GC] Cooldowns limpiados: ${eliminados} entradas | Restantes: ${cooldowns.size}`);
-}, 15 * 60 * 1000);
-
-// 🧹 Limpieza proactiva de cachés LRU cada 10 minutos (anti memory-leak en Render).
-// Antes, las entradas expiradas por TTL solo se borraban cuando alguien las
-// volvía a consultar (get/has). Si una clave nunca se repetía, quedaba ocupando
-// RAM hasta que la evicción por tamaño la sacara. Este barrido activo evita eso.
-setInterval(() => {
-    if (typeof botState === 'undefined') return;
+function limpiarCachesMemoria(ttlCooldownMs = 5 * 60 * 1000) {
+    if (typeof botState === 'undefined') return 0;
     const cachesLRU = [
         ['cacheTrad', botState.cacheTrad],
         ['mangaInfo', botState.mangaInfo], ['silenciados', botState.silenciados],
@@ -109,17 +94,50 @@ setInterval(() => {
         ['groupCache', botState.groupCache], ['adminCache', botState.adminCache]
     ];
     let totalLimpiado = 0;
-    for (const [nombre, cache] of cachesLRU) {
+    for (const [, cache] of cachesLRU) {
         if (cache && typeof cache.cleanup === 'function') {
-            const n = cache.cleanup();
-            totalLimpiado += n;
+            totalLimpiado += cache.cleanup();
         }
     }
-    // Barrido de sesiones interactivas y juegos sin TTL propio (5 min).
-    // mangaSessions/novelaSessions solo se purgaban lazy al acceder; los chats
-    // inactivos quedaban en RAM para siempre. juegos/duelos/propuestas son
-    // objetos planos sin expiración y bloqueaban nuevos juegos si el usuario
-    // abandonaba a mitad de partida.
+    const ahora = Date.now();
+    for (const [key, ts] of cooldowns.entries()) {
+        if (ahora - ts > ttlCooldownMs) { cooldowns.delete(key); totalLimpiado++; }
+    }
+    if (globalThis.__dupCmd) {
+        for (const [k, ts] of globalThis.__dupCmd.entries()) {
+            if (ahora - ts > 10000) { globalThis.__dupCmd.delete(k); totalLimpiado++; }
+        }
+    }
+    if (botState.antiSpam?.tracker) {
+        for (const [uid, s] of botState.antiSpam.tracker.entries()) {
+            if (ahora - s.startTime > botState.antiSpam.interval) {
+                botState.antiSpam.tracker.delete(uid);
+                totalLimpiado++;
+            }
+        }
+    }
+    for (const [uid, ts] of nombreWaSync.entries()) {
+        if (ahora - ts > NOMBRE_WA_TTL_MS) { nombreWaSync.delete(uid); totalLimpiado++; }
+    }
+    for (const [cid, st] of colaSalida.entries()) {
+        if (st && st.cola.length === 0 && !st.procesando) { colaSalida.delete(cid); totalLimpiado++; }
+    }
+    return totalLimpiado;
+}
+
+let _stickerCleanups = 0;
+async function limpiarCachePostSticker() {
+    _stickerCleanups++;
+    limpiarCachesMemoria();
+    await limpiarTemporalesStickers(120000);
+    // Si se inicio Node con --expose-gc y el heap crece bajo ráfaga, liberar sin bloquear
+    if (typeof global.gc === 'function' && process.memoryUsage().heapUsed > 160 * 1024 * 1024) {
+        try { global.gc(); } catch (_) { }
+    }
+}
+
+setInterval(() => {
+    const totalLimpiado = limpiarCachesMemoria();
     try {
         const ahora = Date.now();
         const TTL_SESION = 5 * 60 * 1000;
@@ -134,7 +152,7 @@ setInterval(() => {
             const ts = j && (j._ts || j.creadoEn || j.inicio);
             if (!j) delete botState.juegos[chatId];
             else if (ts && ahora - ts > TTL_JUEGO) delete botState.juegos[chatId];
-            else if (!ts) j._ts = ahora; // primera vez visto: marcar para futuro barrido
+            else if (!ts) j._ts = ahora;
         }
         for (const [k, d] of Object.entries(botState.duelos)) {
             if (d && d.expira && ahora > d.expira) delete botState.duelos[k];
@@ -143,7 +161,7 @@ setInterval(() => {
             if (p && p.expira && ahora > p.expira) delete botState.propuestasBodas[k];
         }
     } catch (e) { }
-    if (totalLimpiado > 0 && VERBOSE_LOGS) console.log(`[GC] Cachés LRU limpiadas: ${totalLimpiado} entradas expiradas.`);
+    if (totalLimpiado > 0 && VERBOSE_LOGS) console.log(`[GC] Cachés limpiadas: ${totalLimpiado} entradas expiradas.`);
 }, 10 * 60 * 1000);
 
 let procesosActivos = 0; // LIMITADOR DE HARDWARE
@@ -820,7 +838,7 @@ function dashboardHandler(req, res) {
                 heapTotal: +(mem.heapTotal / 1048576).toFixed(1)
             },
             latencia: resumenLatencias(),
-            stickersPool: stickerPool.getStats(),
+            stickersPool: { ...stickerPool.getStats(), cacheCleanups: _stickerCleanups },
             queues
         });
         return;
@@ -877,10 +895,10 @@ async function convertirAWebp(buffer, isVideo = false) {
     return convertirAWebpBuffer(buffer, isVideo, { ffmpegPath: FFMPEG_PATH });
 }
 
-// Pool combinado de stickers: usa workers PC conectados por WebSocket
-// cuando están disponibles (con fallback automático al worker local de Render).
+// Pool combinado de stickers: con PC conectada usa 100% la PC; si la PC está
+// apagada usa Render de respaldo de a 1 ffmpeg para no saturar 0.1 vCPU con timeouts.
 const stickerPool = new StickerPool({
-    maxLocal: envInt('MAX_STICKERS_LOCAL', envInt('MAX_PROCESOS', 2, 1), 1),
+    maxLocal: envInt('MAX_STICKERS_LOCAL', 1, 1),
     maxQueue: envInt('MAX_COLA_STICKERS', 200, 20),
     workerJobTimeoutMs: envInt('WORKER_JOB_TIMEOUT_MS', 45000, 10000),
     localRunner: ({ buffer, esVideo, necesitaAudio, audioBuffer }) => procesarStickerCompleto({
@@ -2073,6 +2091,8 @@ async function procesarMensaje(sock, msg) {
                     botState, db, delay, FFMPEG_PATH, ADMIN_NUM,
                     traducirConCache, convertirAWebp, extraerAudioSticker, prepararAudioParaSticker, downloadMediaMessage,
                     stickerPool,
+                    limpiarCachePostSticker,
+                    getMediaConn: (force = false) => (sock.refreshMediaConn ? sock.refreshMediaConn(!!force).catch(() => null) : Promise.resolve(null)),
                     quotedMsgId, quotedParticipant, msgType,
                     sockOriginal: sock // Para comandos express que necesitan bypass de cola
                 };

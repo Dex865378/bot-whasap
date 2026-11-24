@@ -26,8 +26,6 @@ function verifyAuth(secret, ts, sig, now = Date.now(), maxSkewMs = 120000) {
     return crypto.timingSafeEqual(a, b);
 }
 
-// Frame binario compacto: [4B uint32BE headerLen][UTF-8 JSON con lengths][buffers contiguos]
-// Evita +33% de memoria en V8 de Base64 para videos de hasta 15 MB.
 function encodeFrame(meta, buffers = []) {
     const clean = buffers.map(b => (Buffer.isBuffer(b) ? b : EMPTY_BUF));
     const header = Buffer.from(JSON.stringify({ ...meta, lengths: clean.map(b => b.length) }), 'utf8');
@@ -59,16 +57,21 @@ class StickerPool {
         this.maxLocal = Math.max(1, Number(opts.maxLocal) || 2);
         this.maxQueue = Math.max(10, Number(opts.maxQueue) || 200);
         this.workerJobTimeoutMs = Math.max(5000, Number(opts.workerJobTimeoutMs) || 45000);
+        // Mientras haya PC conectada, Render NO procesa FFmpeg pesado (esperar 0.5s
+        // a la PC es ~50x más rápido que 48s en Render). Puede desactivarse si se
+        // quiere modo mixto estricto pasando pcOnlyWhenConnected: false.
+        this.pcOnlyWhenConnected = opts.pcOnlyWhenConnected !== false;
         this.localRunner = opts.localRunner || null;
         this.getSecret = opts.getSecret || deriveWorkerSecret;
         this.logger = opts.logger || console;
 
-        this.workers = new Map(); // id -> { id, ws, name, concurrency, active, inflight: Map, lastPong }
+        this.workers = new Map();
         this.localActive = 0;
-        this.queue = []; // waiters para cualquier slot (PC o Render)
-        this.localWaiters = []; // waiters exclusivos de slot local (fallbacks PC -> Render)
+        this.queue = [];
+        this.localWaiters = [];
 
         this.stats = {
+            donePcDirect: 0,
             donePc: 0,
             doneLocal: 0,
             fallbacks: 0,
@@ -83,9 +86,9 @@ class StickerPool {
         this._httpServer = null;
     }
 
-    hasFreePcWorker() {
+    hasAlivePcWorker() {
         for (const w of this.workers.values()) {
-            if (w.ws.readyState === 1 && w.active < w.concurrency) return true;
+            if (w.ws.readyState === 1) return true;
         }
         return false;
     }
@@ -110,6 +113,10 @@ class StickerPool {
         if (pc) {
             pc.active++;
             return { kind: 'pc', worker: pc, released: false };
+        }
+        // Si la PC está conectada y llena, esperar turno en PC antes de atascar Render
+        if (this.pcOnlyWhenConnected && this.hasAlivePcWorker()) {
+            return null;
         }
         if (this.localActive < this.maxLocal) {
             this.localActive++;
@@ -166,16 +173,13 @@ class StickerPool {
         }
     }
 
-    _sendJobToPc(worker, { buffer, esVideo, necesitaAudio, audioBuffer }) {
+    _dispatchPcFrame(worker, meta, buffers) {
         return new Promise((resolve, reject) => {
             if (!worker || worker.ws.readyState !== 1) {
                 return reject(new Error('Worker PC desconectado'));
             }
             const id = `j_${++this._jobSeq}`;
-            const payload = encodeFrame(
-                { type: 'job', id, esVideo: !!esVideo, necesitaAudio: !!necesitaAudio },
-                [buffer, audioBuffer || EMPTY_BUF]
-            );
+            const payload = encodeFrame({ ...meta, id }, buffers);
 
             const timer = setTimeout(() => {
                 worker.inflight.delete(id);
@@ -216,9 +220,32 @@ class StickerPool {
         return { stiker, audio };
     }
 
+    async _descargarParaLocal({ descargarMedia, descargarAudioCitado, esVideo, necesitaAudio, maxBytes }) {
+        let buffer;
+        try {
+            buffer = await descargarMedia();
+        } catch (e) {
+            return { downloadError: e };
+        }
+        if (!buffer || buffer.length === 0) return { empty: true };
+        if (buffer.length > maxBytes) return { tooLarge: true };
+
+        let audioBuffer = null;
+        if (necesitaAudio && !esVideo && descargarAudioCitado) {
+            try {
+                const ab = await descargarAudioCitado();
+                if (ab && ab.length && ab.length <= maxBytes) audioBuffer = ab;
+            } catch (_) { }
+        }
+        return { buffer, audioBuffer };
+    }
+
     async procesarSticker({
         descargarMedia,
         descargarAudioCitado = null,
+        mediaProtoBytes = null,
+        audioProtoBytes = null,
+        getMediaConn = null,
         esVideo = false,
         necesitaAudio = false,
         fallbackConvertir,
@@ -228,44 +255,97 @@ class StickerPool {
         let turn = await this.acquireTurn();
         if (!turn) return { overloaded: true, stiker: null, audio: null };
 
+        let cachedLocalMedia = null;
         try {
-            let buffer;
-            try {
-                buffer = await descargarMedia();
-            } catch (e) {
-                return { downloadError: e, stiker: null, audio: null };
-            }
-            if (!buffer || buffer.length === 0) return { empty: true, stiker: null, audio: null };
-            if (buffer.length > maxBytes) return { tooLarge: true, stiker: null, audio: null };
-
-            let audioBuffer = null;
-            if (necesitaAudio && !esVideo && descargarAudioCitado) {
-                try {
-                    const ab = await descargarAudioCitado();
-                    if (ab && ab.length && ab.length <= maxBytes) audioBuffer = ab;
-                } catch (_) { }
-            }
-
             if (turn.kind === 'pc') {
-                if (turn.worker && turn.worker.ws.readyState === 1) {
+                const canRemote = Buffer.isBuffer(mediaProtoBytes) && mediaProtoBytes.length > 0;
+                if (canRemote && turn.worker && turn.worker.ws.readyState === 1) {
+                    let mediaConn = null;
+                    if (getMediaConn) {
+                        try {
+                            const mc = await getMediaConn(false);
+                            if (mc?.auth && Array.isArray(mc.hosts) && mc.hosts.length) {
+                                mediaConn = { auth: mc.auth, hosts: mc.hosts };
+                            }
+                        } catch (_) { }
+                    }
                     try {
-                        const res = await this._sendJobToPc(turn.worker, { buffer, esVideo, necesitaAudio, audioBuffer });
-                        if (res && res.stiker && res.stiker.length) {
+                        const res = await this._dispatchPcFrame(
+                            turn.worker,
+                            {
+                                type: 'job_remote',
+                                esVideo: !!esVideo,
+                                necesitaAudio: !!necesitaAudio,
+                                hasAudioProto: Buffer.isBuffer(audioProtoBytes) && audioProtoBytes.length > 0,
+                                mediaConn
+                            },
+                            [mediaProtoBytes, audioProtoBytes || EMPTY_BUF]
+                        );
+                        if (res?.needRefreshConn && getMediaConn) {
+                            getMediaConn(true).catch(() => { });
+                        }
+                        if (res?.fatalReason === 'tooLarge') return { tooLarge: true, stiker: null, audio: null };
+                        if (res?.fatalReason === 'empty') return { empty: true, stiker: null, audio: null };
+                        if (res?.fatalReason === 'downloadError') {
+                            return { downloadError: new Error(res.fatalMessage || 'download failed'), stiker: null, audio: null };
+                        }
+                        if (res?.preuploadedStickerMsg) {
+                            this.stats.donePcDirect++;
+                            return { preuploadedStickerMsg: res.preuploadedStickerMsg, via: 'pc_direct' };
+                        }
+                        if (res?.stiker && res.stiker.length) {
                             this.stats.donePc++;
-                            return { ...res, via: 'pc' };
+                            return { stiker: res.stiker, audio: res.audio || null, via: 'pc' };
                         }
                     } catch (e) {
-                        this.logger.warn?.(`[STICKER-POOL] Fallo en worker PC (${turn.worker.name}): ${e.message}. Reintentando en Render.`);
+                        this.logger.warn?.(`[STICKER-POOL] Fallo en job_remote PC (${turn.worker.name}): ${e.message}.`);
+                    }
+                } else {
+                    // Modo compatibilidad: si no hay protoBytes (p. ej. test mock), bajar y enviar buffer crudo
+                    const bajado = await this._descargarParaLocal({
+                        descargarMedia, descargarAudioCitado, esVideo, necesitaAudio, maxBytes
+                    });
+                    if (bajado.downloadError || bajado.empty || bajado.tooLarge) return { ...bajado, stiker: null, audio: null };
+                    cachedLocalMedia = bajado;
+                    if (turn.worker && turn.worker.ws.readyState === 1) {
+                        try {
+                            const res = await this._dispatchPcFrame(
+                                turn.worker,
+                                { type: 'job', esVideo: !!esVideo, necesitaAudio: !!necesitaAudio },
+                                [bajado.buffer, bajado.audioBuffer || EMPTY_BUF]
+                            );
+                            if (res?.stiker && res.stiker.length) {
+                                this.stats.donePc++;
+                                return { ...res, via: 'pc' };
+                            }
+                        } catch (e) {
+                            this.logger.warn?.(`[STICKER-POOL] Fallo en worker PC (${turn.worker.name}): ${e.message}. Reintentando en Render.`);
+                        }
                     }
                 }
-                // Auto-fallback a Render si el worker PC cayó o falló a mitad
+
+                // Auto-fallback a Render si la PC cayó o falló
                 this.stats.fallbacks++;
                 this.releaseTurn(turn);
                 turn = await this.acquireLocalTurn();
             }
 
+            if (!cachedLocalMedia) {
+                cachedLocalMedia = await this._descargarParaLocal({
+                    descargarMedia, descargarAudioCitado, esVideo, necesitaAudio, maxBytes
+                });
+                if (cachedLocalMedia.downloadError || cachedLocalMedia.empty || cachedLocalMedia.tooLarge) {
+                    return { ...cachedLocalMedia, stiker: null, audio: null };
+                }
+            }
+
             const resLocal = await this._runLocal({
-                buffer, esVideo, necesitaAudio, audioBuffer, fallbackConvertir, fallbackAudio
+                buffer: cachedLocalMedia.buffer,
+                esVideo,
+                necesitaAudio,
+                audioBuffer: cachedLocalMedia.audioBuffer,
+                fallbackConvertir,
+                fallbackAudio
             });
             if (resLocal && resLocal.stiker) this.stats.doneLocal++;
             return { ...resLocal, via: 'render' };
@@ -276,7 +356,7 @@ class StickerPool {
 
     registerWorkerSocket(ws, hello = {}) {
         const id = `pc_${++this._workerSeq}`;
-        const concurrency = Math.max(1, Math.min(12, Number(hello.concurrency) || 4));
+        const concurrency = Math.max(1, Math.min(12, Number(hello.concurrency) || 6));
         const name = String(hello.name || 'pc').slice(0, 40);
         const worker = {
             id,
@@ -311,7 +391,22 @@ class StickerPool {
                 const pending = worker.inflight.get(meta.id);
                 if (!pending) return;
                 worker.inflight.delete(meta.id);
-                if (!meta.ok || !buffers[0] || !buffers[0].length) {
+
+                if (!meta.ok) {
+                    if (meta.fatalReason) {
+                        return pending.resolve({ fatalReason: meta.fatalReason, fatalMessage: meta.error || '' });
+                    }
+                    return pending.reject(new Error(meta.error || 'Worker devolvió error'));
+                }
+
+                if (meta.preuploaded && buffers[0] && buffers[0].length) {
+                    return pending.resolve({
+                        preuploadedStickerMsg: Buffer.from(buffers[0]),
+                        needRefreshConn: !!meta.needRefreshConn
+                    });
+                }
+
+                if (!buffers[0] || !buffers[0].length) {
                     return pending.reject(new Error(meta.error || 'Worker devolvió resultado vacío'));
                 }
                 const stiker = Buffer.from(buffers[0]);
@@ -320,7 +415,7 @@ class StickerPool {
                 const audio = (audioOgg && waveform)
                     ? { buffer: audioOgg, segundos: Number(meta.audioSegundos) || 3, waveform }
                     : null;
-                pending.resolve({ stiker, audio });
+                pending.resolve({ stiker, audio, needRefreshConn: !!meta.needRefreshConn });
             } catch (e) {
                 this.logger.warn?.('[WORKER-POOL] Frame inválido de worker:', e.message);
             }
@@ -365,7 +460,7 @@ class StickerPool {
 
                 wss.handleUpgrade(req, socket, head, (ws) => {
                     const name = req.headers['x-worker-name'] || url.searchParams.get('name') || 'pc';
-                    const concurrency = req.headers['x-worker-concurrency'] || url.searchParams.get('concurrency') || 4;
+                    const concurrency = req.headers['x-worker-concurrency'] || url.searchParams.get('concurrency') || 6;
                     this.registerWorkerSocket(ws, { name, concurrency });
                 });
             } catch (_) {

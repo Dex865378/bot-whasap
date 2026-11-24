@@ -31,7 +31,7 @@ const {
     TAG_AUDIO
 } = require('../utils/stickerSonido');
 const { extraerAudioSticker } = require('../utils/media');
-const { resolverFfmpeg, convertirAWebpBuffer } = require('../utils/stickerProcessor');
+const { resolverFfmpeg, convertirAWebpBuffer, limpiarTemporalesStickers } = require('../utils/stickerProcessor');
 const { StickerPool, signAuth, verifyAuth, encodeFrame, decodeFrame } = require('../utils/stickerPool');
 const { execute } = require('../commands/main');
 
@@ -469,7 +469,7 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.strictEqual(verifyAuth(secret, now, 'deadbeef', now), false, 'firma manipulada debe fallar');
     });
 
-    await probar('StickerPool combina PC (WebSocket) + Render local bajo rafaga y hace fallback si PC cae', async () => {
+    await probar('StickerPool envia todo a PC cuando esta conectada y hace fallback a Render si PC cae', async () => {
         const secret = 'test-secret-pool';
         let hechosEnLocal = 0;
         const pool = new StickerPool({
@@ -509,14 +509,13 @@ function sockFalso({ fallaUpload = false } = {}) {
         pcWs.on('message', async (data, isBinary) => {
             if (!isBinary) return;
             const { meta, buffers } = decodeFrame(data);
-            await new Promise(r => setTimeout(r, 20));
+            await new Promise(r => setTimeout(r, 15));
             const out = Buffer.concat([Buffer.from('PC:'), buffers[0].subarray(0, 4)]);
             pcWs.send(encodeFrame({ type: 'result', id: meta.id, ok: true, audioSegundos: 0 }, [out, Buffer.alloc(0), Buffer.alloc(0)]), { binary: true });
         });
-        // Esperar registro del hello
         await new Promise(r => setTimeout(r, 30));
 
-        // 3. Ráfaga de 14 peticiones simultáneas -> PC (3) + Render (2) + cola (9), 0 rechazadas
+        // 3. Ráfaga de 14 peticiones -> 100% procesadas en PC sin cargar a Render
         const resultados = await Promise.all(
             Array.from({ length: 14 }, (_, i) => pool.procesarSticker({
                 descargarMedia: async () => Buffer.from(`img_${i}_payload`),
@@ -527,7 +526,8 @@ function sockFalso({ fallaUpload = false } = {}) {
         );
         assert.strictEqual(resultados.filter(r => r.stiker && r.stiker.length > 0).length, 14, 'todos los 14 stickers deben completarse');
         const st = pool.getStats();
-        assert.ok(st.donePc > 0 && st.doneLocal > 0, `debe combinar PC (${st.donePc}) y Render (${st.doneLocal})`);
+        assert.strictEqual(st.donePc, 14, 'con PC conectada todo debe resolverse en la PC');
+        assert.strictEqual(st.doneLocal, 0, 'Render no debe procesar FFmpeg mientras PC esta viva');
 
         // 4. Fallback si PC se cae en mitad del trabajo
         pcWs.removeAllListeners('message');
@@ -545,12 +545,107 @@ function sockFalso({ fallaUpload = false } = {}) {
         await new Promise(r => srv.close(r));
     });
 
+    await probar('job_remote delega descarga y subida a PC y Render solo envia por relayMessage', async () => {
+        const secret = 'test-secret-remote';
+        const pool = new StickerPool({
+            maxLocal: 1,
+            maxQueue: 20,
+            workerJobTimeoutMs: 5000,
+            getSecret: () => secret
+        });
+        const srv = http.createServer((req, res) => { res.statusCode = 404; res.end(); });
+        pool.attachServer(srv, { wsPath: '/ws/worker' });
+        await new Promise(r => srv.listen(0, '127.0.0.1', r));
+        const port = srv.address().port;
+
+        const ts = Date.now();
+        const pcWs = new WebSocket(`ws://127.0.0.1:${port}/ws/worker?ts=${ts}&sig=${signAuth(secret, ts)}&name=ryzen-full&concurrency=4`);
+        await new Promise((resolve, reject) => {
+            pcWs.on('open', resolve);
+            pcWs.on('error', reject);
+        });
+
+        let ultimoTipoRecibido = null;
+        pcWs.on('message', (data, isBinary) => {
+            if (!isBinary) return;
+            const { meta } = decodeFrame(data);
+            ultimoTipoRecibido = meta.type;
+            const preMsg = proto.Message.StickerMessage.encode(proto.Message.StickerMessage.create({
+                url: 'https://mmg.whatsapp.net/pc-uploaded',
+                directPath: '/v/t62/pc-uploaded',
+                mediaKey: Buffer.alloc(32, 4),
+                fileSha256: Buffer.alloc(32, 5),
+                fileEncSha256: Buffer.alloc(32, 6),
+                mimetype: 'image/webp',
+                width: 512,
+                height: 512,
+                isAnimated: true,
+                stickerSentTs: Date.now(),
+                audioMessage: {
+                    url: 'https://mmg.whatsapp.net/pc-audio',
+                    directPath: '/v/t62/pc-audio',
+                    mediaKey: Buffer.alloc(32, 7),
+                    mimetype: 'audio/ogg; codecs=opus',
+                    ptt: true,
+                    seconds: 4,
+                    waveform: Buffer.alloc(64, 33)
+                }
+            })).finish();
+            pcWs.send(encodeFrame({ type: 'result', id: meta.id, ok: true, preuploaded: true }, [Buffer.from(preMsg)]), { binary: true });
+        });
+        await new Promise(r => setTimeout(r, 30));
+
+        let descargasRender = 0;
+        let conversionesRender = 0;
+        let relayCapturado = null;
+        const sockMock = {
+            user: { id: '521999999@s.whatsapp.net' },
+            sendMessage: async () => { throw new Error('no debe usar sendMessage si viene preuploaded'); },
+            relayMessage: async (_jid, message) => { relayCapturado = message; return { status: 1 }; }
+        };
+        const msgMock = {
+            key: { remoteJid: 'grp@g.us', id: 'REM1', fromMe: false },
+            message: {
+                videoMessage: {
+                    url: 'https://mmg.whatsapp.net/src-vid',
+                    directPath: '/v/t62/src-vid',
+                    mediaKey: Buffer.alloc(32, 1),
+                    mimetype: 'video/mp4',
+                    seconds: 4
+                }
+            }
+        };
+
+        await execute(sockMock, 'grp@g.us', msgMock, [], {
+            start: '!s', cmd: '!s', txt: '!s', isGroup: true, sender: 'u1@s.whatsapp.net', pushName: 'U',
+            downloadMediaMessage: async () => { descargasRender++; return Buffer.from('render'); },
+            convertirAWebp: async (b) => { conversionesRender++; return b; },
+            extraerAudioSticker: async () => null,
+            prepararAudioParaSticker: async () => null,
+            stickerPool: pool,
+            getMediaConn: async () => ({ auth: 'tok', hosts: [{ hostname: 'mmg.whatsapp.net', maxContentLengthBytes: 50000000 }] }),
+            sockOriginal: sockMock,
+            FFMPEG_PATH: FFMPEG, botState: {}, db: {}
+        });
+
+        assert.strictEqual(ultimoTipoRecibido, 'job_remote', 'debe despachar job_remote sin bajar en Render');
+        assert.strictEqual(descargasRender, 0, 'Render no debe descargar el video');
+        assert.strictEqual(conversionesRender, 0, 'Render no debe convertir en FFmpeg');
+        assert.ok(relayCapturado?.stickerMessage?.url === 'https://mmg.whatsapp.net/pc-uploaded', 'Render solo hace relayMessage del sticker pre-subido');
+        assert.ok(relayCapturado?.stickerMessage?.audioMessage?.seconds === 4, 'audioMessage campo 26 sobrevive al relayMessage');
+        assert.strictEqual(pool.getStats().donePcDirect, 1);
+
+        pool.close();
+        await new Promise(r => srv.close(r));
+    });
+
     await probar('!s acepta rafaga simultanea de 15 peticiones de un mismo usuario sin rechazar por cola', async () => {
         const pool = new StickerPool({
             maxLocal: 3,
             maxQueue: 100,
             localRunner: async ({ buffer }) => ({ stiker: Buffer.from('WEBP_OK_' + buffer.toString()), audio: null })
         });
+        let cleanupsLlamados = 0;
         const enviados = [];
         const sock = {
             sendMessage: async (_jid, payload) => { enviados.push(payload); return { key: { id: 'k' } }; }
@@ -565,11 +660,27 @@ function sockFalso({ fallaUpload = false } = {}) {
             extraerAudioSticker: async () => null,
             prepararAudioParaSticker: async () => null,
             stickerPool: pool,
+            limpiarCachePostSticker: async () => { cleanupsLlamados++; },
             FFMPEG_PATH: FFMPEG, botState: {}, db: {}
         }));
         await Promise.all(trabajos);
         const stickersOk = enviados.filter(e => Buffer.isBuffer(e.sticker));
         assert.strictEqual(stickersOk.length, 15, 'ninguno de los 15 !s concurrentes debe ser rechazado');
+        assert.strictEqual(cleanupsLlamados, 15, 'debe limpiar cache al terminar cada sticker');
+    });
+
+    await probar('limpiarTemporalesStickers borra solo residuos viejos stk_*', async () => {
+        const tmpOld = path.join(os.tmpdir(), `stk_test_old_${Date.now()}.bin`);
+        const tmpFresh = path.join(os.tmpdir(), `stk_test_fresh_${Date.now()}.bin`);
+        fs.writeFileSync(tmpOld, 'x');
+        fs.writeFileSync(tmpFresh, 'y');
+        const oldDate = new Date(Date.now() - 300000);
+        fs.utimesSync(tmpOld, oldDate, oldDate);
+        const borrados = await limpiarTemporalesStickers(120000);
+        assert.ok(borrados >= 1, 'debe borrar el temporal viejo');
+        assert.strictEqual(fs.existsSync(tmpOld), false, 'temporal viejo eliminado');
+        assert.strictEqual(fs.existsSync(tmpFresh), true, 'temporal reciente conservado');
+        try { fs.unlinkSync(tmpFresh); } catch (_) { }
     });
 
     await probar('index.js exime !s y !sticker de cooldowns, antiSpam y semaforo global', () => {
@@ -597,6 +708,9 @@ function sockFalso({ fallaUpload = false } = {}) {
                 const out = await convertirAWebpBuffer(fs.readFileSync(vidPath), true, { ffmpegPath: FFMPEG, videoThreads: 2 });
                 assert.ok(out && out.length > 100, 'debe producir WebP animado valido');
                 assert.strictEqual(esWebpAnimado(out), true, 'el WebP de video debe conservar animacion');
+                // Re-convertir ese mismo WebP animado no debe fallar como "formato raro"
+                const reOut = await convertirAWebpBuffer(out, false, { ffmpegPath: FFMPEG });
+                assert.ok(reOut && reOut.length > 100 && esWebpAnimado(reOut), 'WebP animado reenviado debe conservarse valido');
             } finally {
                 try { fs.unlinkSync(vidPath); } catch (_) { }
                 try { fs.rmdirSync(dir); } catch (_) { }

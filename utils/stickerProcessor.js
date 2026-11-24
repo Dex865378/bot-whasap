@@ -6,7 +6,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 
-const { esBufferAnimado, extParaBuffer } = require('./media');
+const { esBufferAnimado, esWebpAnimado, esMp4, extParaBuffer, primerFrameWebp } = require('./media');
 const { agregarExifSticker } = require('./stickerExif');
 const { prepararAudioParaSticker } = require('./stickerSonido');
 
@@ -23,9 +23,8 @@ async function resolverArgsVsync(ffmpegPath) {
         const m = String(stdout || '').match(/ffmpeg version (\d+)\.(\d+)/i);
         if (m) {
             const major = parseInt(m[1], 10);
-            const minor = parseInt(m[2], 10);
-            // FFmpeg >= 5.1 introdujo -fps_mode passthrough y FFmpeg 8/9 elimino -vsync
-            if (major > 5 || (major === 5 && minor >= 1)) {
+            // FFmpeg 5.x/6.x soporta -vsync 0; FFmpeg 7/8/9+ requiere -fps_mode passthrough
+            if (major >= 7) {
                 flag = ['-fps_mode', 'passthrough'];
             }
         }
@@ -95,20 +94,21 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
     const ffmpegPath = resolverFfmpeg(opts.ffmpegPath);
     const vf = 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white@0,format=yuva420p';
 
-    const intentar = async (comoVideo) => {
-        const ext = extParaBuffer(buffer, comoVideo);
+    const intentar = async (comoVideo, soloUnFrame = false, bufOverride = null) => {
+        const src = bufOverride || buffer;
+        const ext = extParaBuffer(src, comoVideo || esMp4(src));
         const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const tmpIn = path.join(os.tmpdir(), `stk_in_${uid}.${ext}`);
         const tmpOut = path.join(os.tmpdir(), `stk_out_${uid}.webp`);
-        await fs.promises.writeFile(tmpIn, buffer);
+        await fs.promises.writeFile(tmpIn, src);
         try {
             const videoThreads = String(opts.videoThreads || 1);
             const imgThreads = String(opts.imgThreads || 2);
-            const vsyncArgs = comoVideo ? await resolverArgsVsync(ffmpegPath) : [];
-            const args = comoVideo
+            const vsyncArgs = (comoVideo && !soloUnFrame) ? await resolverArgsVsync(ffmpegPath) : [];
+            const args = (comoVideo && !soloUnFrame)
                 ? ['-threads', videoThreads, '-i', tmpIn, '-vf', vf.replace('lanczos', 'bilinear') + ',fps=8', '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', '6', '-quality', '50', '-compression_level', '1', '-y', tmpOut]
-                : ['-threads', imgThreads, '-i', tmpIn, '-vf', vf, '-quality', '75', '-compression_level', '4', '-y', tmpOut];
-            await execFileAsync(ffmpegPath, args, { timeout: comoVideo ? 30000 : 15000, windowsHide: true });
+                : ['-threads', imgThreads, '-i', tmpIn, '-vf', vf, ...(soloUnFrame ? ['-vframes', '1'] : []), '-quality', '75', '-compression_level', '4', '-y', tmpOut];
+            await execFileAsync(ffmpegPath, args, { timeout: (comoVideo && !soloUnFrame) ? 60000 : 25000, windowsHide: true });
             return await fs.promises.readFile(tmpOut);
         } finally {
             await fs.promises.unlink(tmpIn).catch(() => { });
@@ -116,19 +116,60 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
         }
     };
 
+    if (esWebpAnimado(buffer)) {
+        // ffmpeg no decodifica WebP animado: conservar si ya es 512x512 o extraer primer frame
+        try {
+            return await agregarExifSticker(buffer);
+        } catch (_) {
+            const frame = primerFrameWebp(buffer);
+            if (frame) {
+                try {
+                    const webp = await intentar(false, false, frame);
+                    return await agregarExifSticker(webp);
+                } catch (__) { }
+            }
+        }
+    }
+
     const animado = isVideo || esBufferAnimado(buffer);
     try {
-        const webp = await intentar(animado);
+        const webp = await intentar(animado, false);
         return await agregarExifSticker(webp);
     } catch (e) {
         try {
-            console.warn(`[Sticker] Reintentando como ${animado ? 'imagen' : 'animado'}:`, e.message);
-            const webp2 = await intentar(!animado);
+            console.warn(`[Sticker] Reintentando (${animado ? 'fallback estatico/alt' : 'animado'}):`, e.message);
+            // Si es MP4 y falló animado, conservar extensión mp4 sacando 1 frame en lugar de tratarlo como .png
+            const webp2 = esMp4(buffer)
+                ? await intentar(true, true)
+                : await intentar(!animado, false);
             return await agregarExifSticker(webp2);
         } catch (e2) {
             console.error('❌ [Sticker]', e2.message);
             return null;
         }
+    }
+}
+
+async function limpiarTemporalesStickers(maxEdadMs = 120000) {
+    try {
+        const tmpDir = os.tmpdir();
+        const ahora = Date.now();
+        const files = await fs.promises.readdir(tmpDir);
+        let borrados = 0;
+        for (const name of files) {
+            if (!name.startsWith('stk_')) continue;
+            const full = path.join(tmpDir, name);
+            try {
+                const st = await fs.promises.stat(full);
+                if (ahora - st.mtimeMs >= maxEdadMs) {
+                    await fs.promises.unlink(full).catch(() => { });
+                    borrados++;
+                }
+            } catch (_) { }
+        }
+        return borrados;
+    } catch (_) {
+        return 0;
     }
 }
 
@@ -178,5 +219,6 @@ async function procesarStickerCompleto({
 module.exports = {
     resolverFfmpeg,
     convertirAWebpBuffer,
-    procesarStickerCompleto
+    procesarStickerCompleto,
+    limpiarTemporalesStickers
 };
