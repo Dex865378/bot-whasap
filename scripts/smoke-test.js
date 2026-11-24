@@ -72,7 +72,7 @@ if (m) {
 
 // 5. Módulos core cargan (utils, servicios, responders, database sin init)
 for (const mod of ['utils', 'utils/inputValidator', 'utils/apiClient', 'utils/lruCache', 'utils/media', 'utils/stickerSonido',
-    'utils/stickerProcessor', 'utils/stickerPool',
+    'utils/stickerProcessor', 'utils/stickerPool', 'worker-pc',
     'services/mangadex', 'services/anilist',
     'gameResponder', 'mangaResponder', 'novelaResponder', 'database', 'turso-auth']) {
     try { require(path.join(ROOT, mod)); check(true, `Carga ${mod}`); }

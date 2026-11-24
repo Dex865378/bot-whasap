@@ -587,6 +587,21 @@ function sockFalso({ fallaUpload = false } = {}) {
             const out = await convertirAWebpBuffer(img, false, { ffmpegPath: FFMPEG });
             assert.ok(out && out.length > 20, 'debe producir un webp valido');
         });
+
+        await probar('convertirAWebpBuffer convierte video real a WebP animado (FFmpeg 5.x/9.x)', async () => {
+            const { esWebpAnimado } = require('../utils/media');
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-vid-test-'));
+            const vidPath = path.join(dir, 'clip.mp4');
+            try {
+                execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=12', '-t', '1', '-c:v', 'mpeg4', '-y', vidPath], { windowsHide: true });
+                const out = await convertirAWebpBuffer(fs.readFileSync(vidPath), true, { ffmpegPath: FFMPEG, videoThreads: 2 });
+                assert.ok(out && out.length > 100, 'debe producir WebP animado valido');
+                assert.strictEqual(esWebpAnimado(out), true, 'el WebP de video debe conservar animacion');
+            } finally {
+                try { fs.unlinkSync(vidPath); } catch (_) { }
+                try { fs.rmdirSync(dir); } catch (_) { }
+            }
+        });
     }
 
     console.log(fallos === 0 ? '\n🎉 TEST STICKER SONIDO OK' : `\n💥 TEST STICKER SONIDO: ${fallos} fallo(s)`);

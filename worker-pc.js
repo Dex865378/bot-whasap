@@ -4,11 +4,11 @@ require('dotenv').config();
 const os = require('os');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { createClient } = require('@libsql/client');
 const WebSocket = require('ws');
 
-const db = require('./database');
-const { resolverFfmpeg, procesarStickerCompleto } = require('./stickerProcessor');
-const { deriveWorkerSecret, signAuth, encodeFrame, decodeFrame } = require('./stickerPool');
+const { resolverFfmpeg, procesarStickerCompleto } = require('./utils/stickerProcessor');
+const { deriveWorkerSecret, signAuth, encodeFrame, decodeFrame } = require('./utils/stickerPool');
 
 const execFileAsync = promisify(execFile);
 
@@ -20,12 +20,20 @@ async function descubrirRenderUrl() {
     const manual = process.env.WORKER_RENDER_URL || process.env.RENDER_EXTERNAL_URL;
     if (manual) return manual.trim().replace(/\/+$/, '');
 
+    const url = process.env.TURSO_DATABASE_URL;
+    const token = process.env.TURSO_AUTH_TOKEN;
+    if (!url || !token) return null;
+
     try {
-        const ok = await db.init();
-        if (ok) {
-            const url = await db.obtenerUrlServicio();
-            if (url) return url.trim().replace(/\/+$/, '');
-        }
+        // Consulta directa sin DDL/migraciones para conectar en <1s
+        const client = createClient({ url, authToken: token });
+        const rs = await client.execute({
+            sql: "SELECT public_url FROM bot_instancias WHERE public_url IS NOT NULL AND public_url != '' AND last_seen > ? ORDER BY conectado DESC, last_seen DESC LIMIT 1",
+            args: [Date.now() - 300000]
+        });
+        const encontrado = rs.rows?.[0]?.public_url
+            || (await client.execute("SELECT public_url FROM bot_instancias WHERE public_url IS NOT NULL AND public_url != '' ORDER BY last_seen DESC LIMIT 1")).rows?.[0]?.public_url;
+        if (encontrado) return String(encontrado).trim().replace(/\/+$/, '');
     } catch (e) {
         console.warn('[WORKER-PC] Error consultando Turso:', e.message);
     }

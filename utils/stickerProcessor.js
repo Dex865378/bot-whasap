@@ -13,6 +13,26 @@ const { prepararAudioParaSticker } = require('./stickerSonido');
 const execFileAsync = promisify(execFile);
 
 let _cachedFfmpegPath = null;
+const _vsyncArgsCache = new Map();
+
+async function resolverArgsVsync(ffmpegPath) {
+    if (_vsyncArgsCache.has(ffmpegPath)) return _vsyncArgsCache.get(ffmpegPath);
+    let flag = ['-vsync', '0'];
+    try {
+        const { stdout } = await execFileAsync(ffmpegPath, ['-version'], { timeout: 3000, windowsHide: true });
+        const m = String(stdout || '').match(/ffmpeg version (\d+)\.(\d+)/i);
+        if (m) {
+            const major = parseInt(m[1], 10);
+            const minor = parseInt(m[2], 10);
+            // FFmpeg >= 5.1 introdujo -fps_mode passthrough y FFmpeg 8/9 elimino -vsync
+            if (major > 5 || (major === 5 && minor >= 1)) {
+                flag = ['-fps_mode', 'passthrough'];
+            }
+        }
+    } catch (_) { }
+    _vsyncArgsCache.set(ffmpegPath, flag);
+    return flag;
+}
 
 function resolverFfmpeg(preferido = null) {
     if (preferido) return preferido;
@@ -84,8 +104,9 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
         try {
             const videoThreads = String(opts.videoThreads || 1);
             const imgThreads = String(opts.imgThreads || 2);
+            const vsyncArgs = comoVideo ? await resolverArgsVsync(ffmpegPath) : [];
             const args = comoVideo
-                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', vf.replace('lanczos', 'bilinear') + ',fps=8', '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', '-vsync', '0', '-t', '6', '-quality', '50', '-compression_level', '1', '-y', tmpOut]
+                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', vf.replace('lanczos', 'bilinear') + ',fps=8', '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', '6', '-quality', '50', '-compression_level', '1', '-y', tmpOut]
                 : ['-threads', imgThreads, '-i', tmpIn, '-vf', vf, '-quality', '75', '-compression_level', '4', '-y', tmpOut];
             await execFileAsync(ffmpegPath, args, { timeout: comoVideo ? 30000 : 15000, windowsHide: true });
             return await fs.promises.readFile(tmpOut);
