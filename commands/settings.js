@@ -1,0 +1,404 @@
+/**
+ * Modulo de configuracion y administracion de grupos
+ */
+const path = require('path');
+const fs = require('fs');
+
+const HEADER_BIENVENIDA = '╭━━━━━━━━━━━━━━━━━━━━━━╮\n  ✦ UN NUEVO OTAKU SE UNE ✦\n╰━━━━━━━━━━━━━━━━━━━━━━╯';
+const HEADER_DESPEDIDA = '╭━━━━━━━━━━━━━━━━━━━━━━━╮\n  ✦ QUE LA FUERZA TE ACOMPAÑE ✦\n╰━━━━━━━━━━━━━━━━━━━━━━━╯';
+
+async function refreshGroupCache(db, botState, chatId) {
+    const active = await db.estaGrupoActivo(chatId);
+    const config = { active };
+    botState.groupCache.set(chatId, config);
+    return config;
+}
+
+module.exports = {
+    name: 'settings',
+    isMultiple: true,
+    names: ['!bienvenida', '!setbienvenida', '!despedida', '!setdespedida', '!adm', '!bot', '!reglas', '!setreglas', '!borrareglas', '!tag', '!antispam', '!mododios', '!sincronizar', '!modomanga', '!manga', '!remoto', '!autoadmin', '!antifarma'],
+    async execute(sock, chatId, msg, args, extras) {
+        const { start, isGroup, isAdmin, isGlobalAdmin, db, botState, sender } = extras;
+        if (!isGroup && !isGlobalAdmin) return sock.sendMessage(chatId, { text: 'Este comando solo funciona en grupos.' }, { quoted: msg });
+
+        // !remoto — control remoto del dueño POR PRIVADO (o en grupo).
+        // Si alguien hace trampa: apaga el bot o pon modo admin en ese grupo
+        // sin entrar al grupo. Solo el Administrador Maestro.
+        if (start === '!remoto') {
+            if (!isGlobalAdmin) return sock.sendMessage(chatId, { text: 'Solo el dueño puede usar el control remoto.' }, { quoted: msg });
+            const sub = (args[0] || '').toLowerCase();
+            if (sub === 'id') {
+                if (!isGroup) return sock.sendMessage(chatId, { text: 'Usa *!remoto id* dentro del grupo para ver su ID.' }, { quoted: msg });
+                return sock.sendMessage(chatId, { text: `🆔 ID de este grupo:\n\`${chatId}\`` }, { quoted: msg });
+            }
+            const uso = '📡 *CONTROL REMOTO*\nUso:\n• *!remoto id* (en el grupo, para ver su ID)\n• *!remoto <id-grupo> bot on/off*\n• *!remoto <id-grupo> adm on/off*\n\nEjemplo:\n*!remoto 123456-789@g.us bot off*';
+            let objetivo = (args[0] || '').trim();
+            const que = (args[1] || '').toLowerCase();
+            const modo = (args[2] || '').toLowerCase();
+            if (!objetivo || !que || !modo) return sock.sendMessage(chatId, { text: uso }, { quoted: msg });
+            if (!objetivo.endsWith('@g.us')) {
+                if (!/^[\d-]+$/.test(objetivo)) return sock.sendMessage(chatId, { text: `❌ ID de grupo inválido.\n\n${uso}` }, { quoted: msg });
+                objetivo += '@g.us';
+            }
+            if (que === 'bot') {
+                if (modo === 'off') {
+                    await db.desactivarGrupo(objetivo);
+                    botState.groupCache.delete(objetivo);
+                    return sock.sendMessage(chatId, { text: `🔇 Bot *desactivado* en:\n\`${objetivo}\`` }, { quoted: msg });
+                } else if (modo === 'on') {
+                    await db.activarGrupo(objetivo, sender);
+                    await refreshGroupCache(db, botState, objetivo);
+                    return sock.sendMessage(chatId, { text: `🔊 Bot *activado* en:\n\`${objetivo}\`` }, { quoted: msg });
+                }
+            } else if (que === 'adm' || que === 'admin') {
+                if (modo === 'on') {
+                    const aplicado = await db.activarModoAdmin(objetivo);
+                    botState.groupCache.delete(objetivo);
+                    if (!aplicado) return sock.sendMessage(chatId, { text: `⚠️ No se pudo guardar el ajuste.\n\nSuele pasar cuando el bot no está activado en ese grupo: un admin debe ejecutar *!bot on* ahí primero.\n\nGrupo: \`${objetivo}\`` }, { quoted: msg });
+                    return sock.sendMessage(chatId, { text: `🔒 Modo admin *activado* en:\n\`${objetivo}\`\n_Solo admins pueden usar comandos._` }, { quoted: msg });
+                } else if (modo === 'off') {
+                    await db.desactivarModoAdmin(objetivo);
+                    botState.groupCache.delete(objetivo);
+                    return sock.sendMessage(chatId, { text: `🔓 Modo admin *desactivado* en:\n\`${objetivo}\`` }, { quoted: msg });
+                }
+            }
+            return sock.sendMessage(chatId, { text: uso }, { quoted: msg });
+        }
+
+        if (start === '!mododios') {
+            if (!isGlobalAdmin) {
+                const sNum = sender.split('@')[0];
+                console.log(`[ADMIN] Intento de !mododios denegado para: ${sender}`);
+                return sock.sendMessage(chatId, {
+                    text: `**ACCESO DENEGADO**\n\nEste comando es exclusivo para el Administrador Maestro.\n\nTu ID detectado:\n*${sNum}*\n\nSOLUCION:\nSi eres el admin, verifica en Render que **NUMERO_ADMIN** incluya tu numero real Y el ID largo separados por coma.`
+                }, { quoted: msg });
+            }
+
+            await db.actualizarUsuario(sender, {
+                monedas: 1000000000,
+                xp: 1000000,
+                nivel: 999,
+                inventario: JSON.stringify({
+                    pico_platino: 99, cebo: 99, silencio: 99, fruta: 99, escudo: 99, pocion_xp: 99
+                })
+            });
+            return sock.sendMessage(chatId, { text: '**MODO DIOS ACTIVADO**\n\nStats restauradas al maximo nivel, mortal.' }, { quoted: msg });
+        }
+
+        if (start === '!antispam') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo los administradores del grupo pueden configurar esto.' }, { quoted: msg });
+
+            const mode = args[0]?.toLowerCase();
+            if (mode === 'on') {
+                const aplicado = await db.activarAntiSpam(chatId);
+                await refreshGroupCache(db, botState, chatId);
+                if (!aplicado) return sock.sendMessage(chatId, { text: '⚠️ No se pudo guardar el ajuste.\n\nSuele pasar cuando el bot no está activado en este grupo: un admin debe ejecutar *!bot on* primero. Si ya está activado, probá de nuevo en unos segundos.' }, { quoted: msg });
+                return sock.sendMessage(chatId, { text: '*SISTEMA ANTI-SPAM ACTIVADO EN ESTE GRUPO*\n_Limite: 100 comandos/hora por usuario._' }, { quoted: msg });
+            } else if (mode === 'off') {
+                await db.desactivarAntiSpam(chatId);
+                await refreshGroupCache(db, botState, chatId);
+                return sock.sendMessage(chatId, { text: '*SISTEMA ANTI-SPAM DESACTIVADO EN ESTE GRUPO*' }, { quoted: msg });
+            }
+            const current = botState.groupCache.get(chatId) || await refreshGroupCache(db, botState, chatId);
+            const antiSpamActivo = current.active?.antispam === 1;
+            return sock.sendMessage(chatId, { text: `*SISTEMA ANTI-SPAM*\nEstado en este grupo: ${antiSpamActivo ? '*ACTIVO*' : '*DESACTIVADO*'}\n\nUso: *!antispam on/off*` }, { quoted: msg });
+        }
+
+        if (!isGroup) return;
+
+        if (start === '!tag') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' });
+            const meta = await sock.groupMetadata(chatId);
+            const participants = meta.participants;
+            const message = args.join(' ') || 'Atencion a todos!';
+            const mentions = participants.map(p => p.id);
+            let text = `*AVISO:* ${message}\n\n`;
+            participants.forEach(p => { text += `@${p.id.split('@')[0]} `; });
+            return sock.sendMessage(chatId, { text, mentions });
+        }
+
+        if (start === '!bienvenida') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const mode = (args[0] || '').toLowerCase();
+            if (mode === 'on') {
+                await db.activarBienvenida(chatId);
+                return sock.sendMessage(chatId, { text: 'Bienvenidas *activadas*.\n_El bot no necesita ser admin para saludar._' }, { quoted: msg });
+            } else if (mode === 'off') {
+                await db.desactivarBienvenida(chatId);
+                return sock.sendMessage(chatId, { text: 'Bienvenidas *desactivadas*.' }, { quoted: msg });
+            } else if (mode === 'ver') {
+                const conf = await db.tieneBienvenida(chatId);
+                if (!conf.activa) return sock.sendMessage(chatId, { text: 'Bienvenidas *desactivadas* en este grupo.\nUso: *!bienvenida on*' }, { quoted: msg });
+                return sock.sendMessage(chatId, { text: `👋 *Mensaje actual:*\n\n${conf.mensaje || '_(por defecto)_'}` }, { quoted: msg });
+            } else if (mode === 'test') {
+                // Prueba manual sin esperar que entre alguien. Si se menciona a
+                // usuarios, se les saluda a ellos; si no, al que pide la prueba.
+                const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const targets = mentioned.length > 0 ? mentioned : [sender];
+                const conf = await db.tieneBienvenida(chatId);
+                if (!conf.activa) return sock.sendMessage(chatId, { text: 'Bienvenidas *desactivadas* en este grupo.\nUso: *!bienvenida on*' }, { quoted: msg });
+                for (const t of targets) {
+                    const nombre = (t || '').split('@')[0];
+                    let preview = conf.mensaje || `¡Hola @${nombre}! 🎉\nBienvenid@ al grupo.`;
+                    preview = preview.replace(/{usuario}/gi, `@${nombre}`).replace(/{user}/gi, `@${nombre}`);
+                    await sock.sendMessage(chatId, { text: `🧪 *Prueba de bienvenida:*\n\n${HEADER_BIENVENIDA}\n\n${preview}`, mentions: [t] });
+                }
+                return;
+            }
+            return sock.sendMessage(chatId, { text: 'Uso: *!bienvenida on/off/ver/test*' }, { quoted: msg });
+        }
+
+        if (start === '!setbienvenida') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const message = args.join(' ');
+            if (!message) return sock.sendMessage(chatId, { text: 'Especifica un mensaje. Usa `{usuario}` para mencionar al nuevo miembro.\nEjemplo: *!setbienvenida Hola {usuario}, bienvenido al infierno.*' }, { quoted: msg });
+            const result = await db.setMensajeBienvenida(chatId, message);
+            if (result && result.ok) {
+                await db.activarBienvenida(chatId);
+                return sock.sendMessage(chatId, { text: 'Mensaje de bienvenida actualizado en este grupo.\n_(Las bienvenidas han sido activadas)_' }, { quoted: msg });
+            }
+            console.error(`❌ [!setbienvenida] No se pudo guardar en ${chatId}:`, result?.error || 'desconocido');
+            return sock.sendMessage(chatId, { text: `Error al guardar el mensaje: ${result?.error || 'falla de base de datos'}` }, { quoted: msg });
+        }
+
+        if (start === '!despedida') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const mode = (args[0] || '').toLowerCase();
+            if (mode === 'on') {
+                await db.activarDespedida(chatId);
+                return sock.sendMessage(chatId, { text: 'Despedidas *activadas*.\n_El bot no necesita ser admin para despedir._' }, { quoted: msg });
+            } else if (mode === 'off') {
+                await db.desactivarDespedida(chatId);
+                return sock.sendMessage(chatId, { text: 'Despedidas *desactivadas*.' }, { quoted: msg });
+            } else if (mode === 'ver') {
+                const conf = await db.tieneDespedida(chatId);
+                if (!conf.activa) return sock.sendMessage(chatId, { text: 'Despedidas *desactivadas* en este grupo.\nUso: *!despedida on*' }, { quoted: msg });
+                return sock.sendMessage(chatId, { text: `👋 *Mensaje actual:*\n\n${conf.mensaje || '_(por defecto)_'}` }, { quoted: msg });
+            } else if (mode === 'test') {
+                const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+                const targets = mentioned.length > 0 ? mentioned : [sender];
+                const conf = await db.tieneDespedida(chatId);
+                if (!conf.activa) return sock.sendMessage(chatId, { text: 'Despedidas *desactivadas* en este grupo.\nUso: *!despedida on*' }, { quoted: msg });
+                for (const t of targets) {
+                    const nombre = (t || '').split('@')[0];
+                    let preview = conf.mensaje || `Adiós @${nombre} 👋\nSe salió del grupo.`;
+                    preview = preview.replace(/{usuario}/gi, `@${nombre}`).replace(/{user}/gi, `@${nombre}`);
+                    await sock.sendMessage(chatId, { text: `🧪 *Prueba de despedida:*\n\n${HEADER_DESPEDIDA}\n\n${preview}`, mentions: [t] });
+                }
+                return;
+            }
+            return sock.sendMessage(chatId, { text: 'Uso: *!despedida on/off/ver/test*' }, { quoted: msg });
+        }
+
+        if (start === '!setdespedida') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const message = args.join(' ');
+            if (!message) return sock.sendMessage(chatId, { text: 'Especifica un mensaje. Usa `{usuario}` para mencionar al que se fue.\nEjemplo: *!setdespedida Adiós {usuario}, se lo va a extrañar.*' }, { quoted: msg });
+            const result = await db.setMensajeDespedida(chatId, message);
+            if (result && result.ok) {
+                await db.activarDespedida(chatId);
+                return sock.sendMessage(chatId, { text: 'Mensaje de despedida actualizado en este grupo.\n_(Las despedidas han sido activadas)_' }, { quoted: msg });
+            }
+            console.error(`❌ [!setdespedida] No se pudo guardar en ${chatId}:`, result?.error || 'desconocido');
+            return sock.sendMessage(chatId, { text: `Error al guardar el mensaje: ${result?.error || 'falla de base de datos'}` }, { quoted: msg });
+        }
+
+        if (start === '!adm') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const mode = args[0]?.toLowerCase();
+            if (mode === 'on') {
+                await db.activarModoAdmin(chatId);
+                await refreshGroupCache(db, botState, chatId);
+                const conf = botState.groupCache.get(chatId);
+                if (!(conf && conf.active && conf.active.modo_admin === 1)) {
+                    return sock.sendMessage(chatId, { text: '⚠️ No se pudo guardar el modo admin.\n\nSuele pasar cuando el bot no está activado en este grupo: un admin debe ejecutar *!bot on* primero. Si ya está activado, probá de nuevo en unos segundos.' }, { quoted: msg });
+                }
+                return sock.sendMessage(chatId, { text: '*MODO ADMIN ACTIVADO EN ESTE GRUPO*\n_Solo los administradores pueden usar comandos._' }, { quoted: msg });
+            } else if (mode === 'off') {
+                await db.desactivarModoAdmin(chatId);
+                await refreshGroupCache(db, botState, chatId);
+                return sock.sendMessage(chatId, { text: '*MODO ADMIN DESACTIVADO*' }, { quoted: msg });
+            }
+            return sock.sendMessage(chatId, { text: 'Uso: *!adm on/off*' }, { quoted: msg });
+        }
+
+        if (start === '!bot') {
+            const senderId = msg.key.participant || msg.key.remoteJid;
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const mode = args[0]?.toLowerCase();
+            if (mode === 'on') {
+                await db.activarGrupo(chatId, senderId);
+                await refreshGroupCache(db, botState, chatId);
+                return sock.sendMessage(chatId, { text: 'Bot *activado* en este grupo.' }, { quoted: msg });
+            } else if (mode === 'off') {
+                await db.desactivarGrupo(chatId);
+                botState.groupCache.delete(chatId);
+                return sock.sendMessage(chatId, { text: 'Bot *desactivado*.' }, { quoted: msg });
+            }
+            return sock.sendMessage(chatId, { text: 'Uso: *!bot on/off*' }, { quoted: msg });
+        }
+
+        // !autoadmin — el bot intenta promoverse a admin a sí mismo.
+        // OJO: WhatsApp NO deja que un no-admin se promueva solo; si el bot
+        // no es admin esto falla y hay que promoverlo a mano una vez.
+        if (start === '!autoadmin') {
+            if (!isAdmin && !isGlobalAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const botJid = sock.user?.id;
+            if (!botJid) return sock.sendMessage(chatId, { text: '❌ No sé cuál es mi propio número (sin conexión).' }, { quoted: msg });
+            try {
+                await sock.groupParticipantsUpdate(chatId, [botJid], 'promote');
+                return sock.sendMessage(chatId, { text: '👑 ¡Listo! Ya soy admin de este grupo.' }, { quoted: msg });
+            } catch (e) {
+                return sock.sendMessage(chatId, { text: '❌ No pude auto-promoverme: WhatsApp no deja que un no-admin se dé admin solo.\n\n👉 Un admin del grupo debe promoverme a mano UNA vez (mantén mi número → Hacer admin). Después ya puedo administrar el grupo solo.' }, { quoted: msg });
+            }
+        }
+
+        // !antifarma — tope de 5 premios/hora por grupo.
+        // !antifarma off = grupo 100% juego: premios sin tope.
+        if (start === '!antifarma') {
+            if (!isAdmin && !isGlobalAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const mode = (args[0] || '').toLowerCase();
+            if (mode === 'off') {
+                const r = await db.setAntifarma(chatId, false, sender);
+                if (!r.ok) return sock.sendMessage(chatId, { text: `❌ No se pudo guardar: ${r.error}` }, { quoted: msg });
+                return sock.sendMessage(chatId, { text: '🎮 *ANTI-FARMA DESACTIVADO* en este grupo.\n_Grupo 100% juego: todos reciben sus recompensas sin tope._' }, { quoted: msg });
+            } else if (mode === 'on') {
+                const r = await db.setAntifarma(chatId, true);
+                if (!r.ok) return sock.sendMessage(chatId, { text: `❌ No se pudo guardar: ${r.error}` }, { quoted: msg });
+                return sock.sendMessage(chatId, { text: '🛡️ *ANTI-FARMA ACTIVADO* en este grupo.\n_Tope: 5 premios por hora por persona._' }, { quoted: msg });
+            }
+            const activo = await db.antifarmaActivo(chatId);
+            return sock.sendMessage(chatId, { text: `🛡️ *ANTI-FARMA*\nEstado: ${activo ? '*ACTIVADO* (5 premios/hora)' : '*DESACTIVADO* (premios sin tope)'}\n\nUso: *!antifarma on/off*` }, { quoted: msg });
+        }
+
+        if (start === '!reglas') {
+            try {
+                const custom = await db.getReglas(chatId).catch(() => null);
+                if (custom) return sock.sendMessage(chatId, { text: `📜 *REGLAS DEL GRUPO*\n\n${custom}` }, { quoted: msg });
+                const meta = await sock.groupMetadata(chatId);
+                return sock.sendMessage(chatId, { text: `*REGLAS DEL GRUPO:*\n\n${meta.desc || 'No hay reglas configuradas.'}\n\n💡 _Un admin puede poner unas con !setreglas <texto>._` }, { quoted: msg });
+            } catch (e) { return sock.sendMessage(chatId, { text: 'Error al obtener reglas.' }); }
+        }
+
+        // !setreglas <texto> — reglas propias del grupo (solo admins)
+        if (start === '!setreglas') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            const texto = args.join(' ').trim().slice(0, 1500);
+            if (!texto) return sock.sendMessage(chatId, { text: '📜 Uso: *!setreglas <texto>*\nEj: *!setreglas 1. Nada de spam. 2. Respeto ante todo.*' }, { quoted: msg });
+            const r = await db.setReglas(chatId, texto, sender).catch(() => ({ ok: false }));
+            if (!r.ok) return sock.sendMessage(chatId, { text: `❌ No se pudo guardar: ${r.error || 'error'}` }, { quoted: msg });
+            return sock.sendMessage(chatId, { text: '📜 Reglas guardadas. Míralas con *!reglas*' }, { quoted: msg });
+        }
+
+        // !borrareglas — vuelve a las reglas de la descripción del grupo
+        if (start === '!borrareglas') {
+            if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+            await db.borrarReglas(chatId).catch(() => false);
+            return sock.sendMessage(chatId, { text: '🗑️ Reglas borradas. *!reglas* vuelve a mostrar la descripción del grupo.' }, { quoted: msg });
+        }
+
+        // !modomanga / !manga on/off - Modo manga exclusivo (desactiva todo menos manga + admin)
+        if (start === '!modomanga' || start === '!manga') {
+            const mode = args[0]?.toLowerCase();
+            if (mode === 'on') {
+                if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+                const aplicado = await db.activarModoManga(chatId);
+                botState.mangaMode.set(chatId, true);
+                if (botState.groupCache) botState.groupCache.delete(chatId);
+                // El modo se aplica igual (fallback en RAM), pero avisamos que
+                // no queda guardado en la DB si el grupo nunca se activó.
+                if (!aplicado) {
+                    await sock.sendMessage(chatId, { text: '⚠️ Ojo: el bot no está activado en este grupo, así que el modo manga *no quedará guardado* y se perderá si el bot se reinicia.\n\nEjecutá *!bot on* para fijarlo.' }, { quoted: msg });
+                }
+
+                let mt = `📚 *DIKY BOT — MODO MANGA ACTIVADO* 📚\n`;
+                mt += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+                mt += `Este grupo ahora es exclusivo para lectura de manga.\n\n`;
+
+                mt += `📖 *[ COMANDOS DE MANGA ]*\n\n`;
+
+                mt += `• *!catalogo*\n`;
+                mt += `└ _Lista los mangas disponibles con sus códigos._\n\n`;
+
+                mt += `• *!manga <nombre o código>*\n`;
+                mt += `└ _Ver portada e información de un manga._\n\n`;
+
+                mt += `• *!leer <código>*\n`;
+                mt += `└ _Ver lista de capítulos disponibles._\n\n`;
+
+                mt += `• *!leer <código> <número>*\n`;
+                mt += `└ _Descargar un capítulo en PDF._\n\n`;
+
+                mt += `• *!leer <código> all*\n`;
+                mt += `└ _Descargar todos los capítulos seguidos._\n\n`;
+
+                mt += `• *!buscar <nombre>*\n`;
+                mt += `└ _Buscar un manga por su título._\n\n`;
+
+                mt += `• *!recomanga*\n`;
+                mt += `└ _Recomienda un manga aleatorio en español._\n\n`;
+
+                mt += `• *!recomanga <género>*\n`;
+                mt += `└ _Recomienda un manga del género elegido (ej: terror)._\n\n`;
+
+                mt += `• *!recomanga generos*\n`;
+                mt += `└ _Ver la lista de géneros disponibles._\n\n`;
+
+                mt += `• *!parar*\n`;
+                mt += `└ _Detener una descarga masiva en curso._\n\n`;
+
+                mt += `⚙️ *[ ADMINISTRACIÓN ]*\n\n`;
+
+                mt += `• *!bot <on/off>*\n`;
+                mt += `└ _Encender o apagar el bot en el grupo._\n\n`;
+
+                mt += `• *!adm <on/off>*\n`;
+                mt += `└ _Permitir comandos solo a administradores._\n\n`;
+
+                mt += `• *!manga off*\n`;
+                mt += `└ _Desactivar modo manga y restaurar todo el bot._\n\n`;
+
+                mt += `━━━━━━━━━━━━━━━━━━━━━━\n`;
+                mt += `> _Guarda la configuración en la base de datos._`;
+
+                return sock.sendMessage(chatId, { text: mt }, { quoted: msg });
+            } else if (mode === 'off') {
+                if (!isAdmin) return sock.sendMessage(chatId, { text: 'Solo admins.' }, { quoted: msg });
+                await db.desactivarModoManga(chatId);
+                botState.mangaMode.delete(chatId);
+                if (botState.groupCache) botState.groupCache.delete(chatId);
+
+                return sock.sendMessage(chatId, {
+                    text: '🔓 *MODO MANGA DESACTIVADO*\n\nTodos los comandos del bot vuelven a estar disponibles en este grupo.'
+                }, { quoted: msg });
+            }
+            // Si tiene argumentos que no son on/off (ej: !manga 019 o !manga Solo Leveling) →
+            // delegar a media.js, que tiene el handler real de ficha de manga.
+            // Necesario porque !manga está registrado en AMBOS módulos y commandHandler.js
+            // solo conserva el último registrado (settings.js, por orden alfabético) en su Map,
+            // pisando el handler de media.js.
+            const mediaModule = require('./media');
+            return mediaModule.execute(sock, chatId, msg, args, extras);
+        }
+
+        if (start === '!sincronizar') {
+            if (!isGlobalAdmin) return sock.sendMessage(chatId, { text: 'Solo el Administrador Maestro puede sincronizar la DB.' }, { quoted: msg });
+
+            const pathM = path.join(__dirname, '..', 'mangas.json');
+            if (!fs.existsSync(pathM)) return sock.sendMessage(chatId, { text: 'No se encontro mangas.json.' });
+
+            try {
+                const local = JSON.parse(fs.readFileSync(pathM, 'utf-8'));
+                let count = 0;
+                for (const m of local) {
+                    await db.guardarManga(m.codigo, m.titulo, m.carpeta, m.resumen || m.descripcion, m.generos);
+                    count++;
+                }
+                return sock.sendMessage(chatId, { text: `**Sincronizacion Completada**\n\nSe han procesado *${count}* mangas localmente y sincronizado con Turso Cloud.` }, { quoted: msg });
+            } catch (e) {
+                return sock.sendMessage(chatId, { text: `Error en sincronizacion: ${e.message}` }, { quoted: msg });
+            }
+        }
+    }
+};
