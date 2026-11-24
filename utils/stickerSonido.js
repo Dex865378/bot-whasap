@@ -96,7 +96,12 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
             }
             picos.push(Math.min(31, Math.round((max / 32767) * 31)));
         }
-        if (!picos.some(v => v > 0)) return { buffer: ogg, segundos: 0, waveform: null };
+        if (!picos.some(v => v > 0)) {
+            // Audio mudo o demasiado bajo: una waveform AUSENTE hace que el
+            // cliente falle al reproducir el sonido del sticker ("no se pudo
+            // reproducir"). Se manda una waveform mínima plana (todo a 1).
+            for (let i = 0; i < N; i++) picos[i] = 1;
+        }
         // Empaquetado 5-bit LSB-first: 8 muestras por 5 bytes (315 bits -> 40 bytes).
         const bytes = [];
         let bits = 0, nbits = 0;

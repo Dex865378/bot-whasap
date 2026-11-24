@@ -241,6 +241,43 @@ function sockFalso({ fallaUpload = false } = {}) {
         }
     });
 
+    // REGRESION: video largo ya NO da error, se convierte con los primeros
+    // segundos (el -t 6 del encode recorta; antes: 'El video es demasiado largo').
+    await probar('!s en video de 45s no da error y lo convierte igual', async () => {
+        const { sock, estado } = sockFalso();
+        const msg = {
+            key: { remoteJid: '123@s.whatsapp.net', id: 'VIDEOLARGO', fromMe: false },
+            message: { videoMessage: { mimetype: 'video/mp4', seconds: 45, fileLength: 5000 } }
+        };
+        await execute(sock, '123@s.whatsapp.net', msg, [], {
+            start: '!s', cmd: '!s', txt: '!s', isGroup: false, sender: '123@s.whatsapp.net', pushName: 'Test',
+            botState: {}, db: {}, FFMPEG_PATH: 'ffmpeg',
+            downloadMediaMessage: async () => Buffer.from('VIDEO'),
+            convertirAWebp: async () => fs.readFileSync(STICKER),
+            prepararAudioParaSticker: async () => ({ buffer: Buffer.from('OggSaudio'), segundos: 6, waveform: Buffer.alloc(40, 9) })
+        });
+        assert.strictEqual(estado.relay, 1, 'debe mandar el sticker con sonido');
+        assert.ok(!estado.enviados.some(m => String(m.content?.text || '').includes('demasiado largo')), 'no debe avisar de video largo');
+    });
+
+    // REGRESION del 'no se pudo reproducir el sonido': audio mudo mandaba
+    // waveform null; ahora lleva una waveform minima plana SIEMPRE.
+    await probar('audio mudo lleva waveform plana (no null)', async () => {
+        const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
+        const { execFileSync } = require('child_process');
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk_mudo_'));
+        const ogg = path.join(dir, 'mudo.ogg');
+        execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono', '-t', '2', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', '-y', ogg], { stdio: 'pipe' });
+        try {
+            const info = await prepararAudioParaSticker(fs.readFileSync(ogg), ffmpeg, 6);
+            assert.ok(info && info.buffer.length > 100, 'extrae OGG');
+            assert.ok(info.waveform && info.waveform.length === 40, 'waveform de 40 bytes aun siendo mudo, fue ' + (info.waveform && info.waveform.length));
+        } finally {
+            try { fs.unlinkSync(ogg); } catch (e) {}
+            try { fs.rmdirSync(dir); } catch (e) {}
+        }
+    });
+
     console.log(fallos === 0 ? '\n🎉 TEST STICKER SONIDO OK' : `\n💥 TEST STICKER SONIDO: ${fallos} fallo(s)`);
     process.exit(fallos === 0 ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });

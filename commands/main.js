@@ -550,7 +550,7 @@ module.exports = {
                 // desde el log de Render sin adivinar.
                 if (quoted) console.warn('[STICKER] Citado sin media reconocible. Claves:', Object.keys(quoted).join(','));
                 return sock.sendMessage(chatId, {
-                    text: '*Como usar el sticker maker:*\n\n• Responde a una imagen/video con *!s*.\n• Video: hasta 10s, sale con sonido.\n• Imagen con sonido: responde al audio con la imagen y pon *!s* de caption.\n\nEl sonido se reproduce en clientes con stickers con sonido (beta).'
+                    text: '*Como usar el sticker maker:*\n\n• Responde a una imagen/video con *!s*.\n• Video: cualquier duración, sale con sonido (se usan los primeros segundos).\n• Imagen con sonido: responde al audio con la imagen y pon *!s* de caption.\n\nEl sonido se reproduce en clientes con stickers con sonido (beta).'
                 }, { quoted: msg });
             }
 
@@ -562,9 +562,12 @@ module.exports = {
                 || media === citada?.videoMessage
                 || (media === msg.message?.documentMessage && msgDocEsVideo)
                 || (media === citada?.documentMessage && docEsVideo));
+            // Video largo: NO se rechaza, se convierte igual. ffmpeg recorta
+            // solo los primeros segundos del sticker (-t 6) y el tope real es
+            // la descarga de 15MB. Antes: error "demasiado largo".
             const videoInfo = esVideo ? media : null;
             if (videoInfo && videoInfo.seconds > 10) {
-                return sock.sendMessage(chatId, { text: '⚠️ *El video es demasiado largo.*\n\nSolo puedes convertir videos de hasta *10 segundos* en stickers.' }, { quoted: msg });
+                console.log(`[STICKER] Video largo (${Math.round(videoInfo.seconds)}s): se convierte con los primeros segundos.`);
             }
 
             // Si hay fila de stickers esperando, se espera el turno en vez de
