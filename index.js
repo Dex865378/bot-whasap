@@ -1564,6 +1564,23 @@ async function procesarMensaje(sock, msg) {
         const isGroup = chatId.endsWith('@g.us');
         const msgType = getContentType(msg.message);
 
+        // --- ESCÁNER: stickers con sonido que llegan de WhatsApp real ---
+        // Registra el formato EXACTO del audio embebido (campo 26) para
+        // replicarlo en los que envía el bot. Solo corre si el sticker trae
+        // audio; cero costo para el resto del tráfico.
+        if (msg.message?.stickerMessage?.audioMessage) {
+            try {
+                const a = msg.message.stickerMessage.audioMessage;
+                console.log(`\n🔬 [SONIDO-DE-VERDAD] sticker recibido con audio embebido:`);
+                console.log(`   mimetype: ${a.mimetype}`);
+                console.log(`   seconds: ${a.seconds} | ptt: ${a.ptt} | viewOnce: ${a.viewOnce}`);
+                console.log(`   waveform: ${a.waveform ? a.waveform.length + ' bytes' : 'AUSENTE'} | streamingSidecar: ${a.streamingSidecar ? a.streamingSidecar.length + ' bytes' : 'no'}`);
+                console.log(`   fileLength: ${a.fileLength} | url: ${String(a.url || '').slice(0, 70)}`);
+                console.log(`   directPath: ${String(a.directPath || '').slice(0, 70)}`);
+                console.log(`   mediaKeyTimestamp: ${a.mediaKeyTimestamp}\n`);
+            } catch (e) { }
+        }
+
         // --- SILENCIO CHECK ---
         const silenciadoHasta = botState.silenciados.get(numJid(sender));
         if (silenciadoHasta && Date.now() < silenciadoHasta) {

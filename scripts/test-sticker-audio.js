@@ -89,6 +89,31 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.ok(audio.url, 'el audio debe tener URL de subida');
     });
 
+    await probar('un sticker entrante con campo 26 recupera el AudioMessage', async () => {
+        // El proto estático de rc.9 no conoce el campo 26: al recibir un
+        // sticker con sonido real, Message.decode lo descartaba. El wrapper de
+        // decode debe reatacharlo sin correrse de offset.
+        const entrante = proto.Message.create({
+            stickerMessage: {
+                url: 'https://mmg/sticker',
+                mimetype: 'image/webp',
+                audioMessage: {
+                    url: 'https://mmg/audio',
+                    directPath: '/v/t62/audio',
+                    mimetype: 'audio/ogg; codecs=opus',
+                    ptt: true,
+                    seconds: 6,
+                    waveform: Buffer.alloc(64, 9)
+                }
+            }
+        });
+        const bytes = proto.Message.encode(entrante).finish();
+        const decodificado = proto.Message.decode(bytes);
+        assert.ok(decodificado.stickerMessage?.audioMessage, 'audioMessage debe sobrevivir al decode');
+        assert.strictEqual(decodificado.stickerMessage.audioMessage.seconds, 6);
+        assert.strictEqual(decodificado.stickerMessage.audioMessage.waveform.length, 64);
+    });
+
     await probar('si falla la subida no manda nada y devuelve null', async () => {
         const { sock, estado } = sockFalso({ fallaUpload: true });
         const res = await enviarStickerConSonido(sock, '123@s.whatsapp.net', fs.readFileSync(STICKER), Buffer.alloc(4096, 1), null);
@@ -214,7 +239,7 @@ function sockFalso({ fallaUpload = false } = {}) {
     });
 
     // REGRESIÓN del "toco el sticker y sale error al reproducir": el
-    // audioMessage embebido debe llevar seconds >= 1 y waveform (40 bytes),
+    // audioMessage embebido debe llevar seconds >= 1 y waveform (64 bytes),
     // igual que toda nota de voz de WhatsApp. Antes Baileys dejaba waveform
     // fuera (audio-decode no instalado) y el cliente no reproducía el sonido.
     await probar('audio embebido lleva seconds y waveform reales (regresión tap-error)', async () => {
@@ -227,14 +252,15 @@ function sockFalso({ fallaUpload = false } = {}) {
             const info = await prepararAudioParaSticker(fs.readFileSync(video), ffmpeg, 6);
             assert.ok(info && info.buffer.length > 100, 'extrae OGG');
             assert.ok(info.segundos >= 1 && info.segundos <= 6.5, 'segundos reales, fue ' + info.segundos);
-            assert.ok(info.waveform && info.waveform.length === 40, 'waveform 40 bytes (63 muestras x 5 bits), fue ' + (info.waveform && info.waveform.length));
+            assert.ok(info.waveform && info.waveform.length === 64, 'waveform 64 bytes (una muestra 0-100 por byte), fue ' + (info.waveform && info.waveform.length));
+            assert.ok([...info.waveform].every(v => v >= 0 && v <= 100), 'cada muestra de waveform debe estar entre 0 y 100');
             // E2E: el mensaje final lleva esos campos dentro del campo 26.
             const { sock, estado } = sockFalso();
             await enviarStickerConSonido(sock, '123@s.whatsapp.net', fs.readFileSync(STICKER), info, null, ffmpeg);
             const audio = leerAudioDelMensaje(estado.capturado);
             assert.ok(audio, 'el mensaje lleva el campo 26');
             assert.ok(Number(audio.seconds) >= 1, 'seconds >= 1, fue ' + audio.seconds);
-            assert.ok(audio.waveform && audio.waveform.length === 40, 'waveform embebido de 40 bytes');
+            assert.ok(audio.waveform && audio.waveform.length === 64, 'waveform embebido de 64 bytes');
         } finally {
             try { fs.unlinkSync(video); } catch (e) {}
             try { fs.rmdirSync(dir); } catch (e) {}
@@ -254,7 +280,7 @@ function sockFalso({ fallaUpload = false } = {}) {
             botState: {}, db: {}, FFMPEG_PATH: 'ffmpeg',
             downloadMediaMessage: async () => Buffer.from('VIDEO'),
             convertirAWebp: async () => fs.readFileSync(STICKER),
-            prepararAudioParaSticker: async () => ({ buffer: Buffer.from('OggSaudio'), segundos: 6, waveform: Buffer.alloc(40, 9) })
+            prepararAudioParaSticker: async () => ({ buffer: Buffer.from('OggSaudio'), segundos: 6, waveform: Buffer.alloc(64, 9) })
         });
         assert.strictEqual(estado.relay, 1, 'debe mandar el sticker con sonido');
         assert.ok(!estado.enviados.some(m => String(m.content?.text || '').includes('demasiado largo')), 'no debe avisar de video largo');
@@ -271,7 +297,7 @@ function sockFalso({ fallaUpload = false } = {}) {
         try {
             const info = await prepararAudioParaSticker(fs.readFileSync(ogg), ffmpeg, 6);
             assert.ok(info && info.buffer.length > 100, 'extrae OGG');
-            assert.ok(info.waveform && info.waveform.length === 40, 'waveform de 40 bytes aun siendo mudo, fue ' + (info.waveform && info.waveform.length));
+            assert.ok(info.waveform && info.waveform.length === 64, 'waveform de 64 bytes aun siendo mudo, fue ' + (info.waveform && info.waveform.length));
         } finally {
             try { fs.unlinkSync(ogg); } catch (e) {}
             try { fs.rmdirSync(dir); } catch (e) {}

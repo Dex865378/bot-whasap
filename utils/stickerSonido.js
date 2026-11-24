@@ -46,6 +46,56 @@ function parchearProtoSonido() {
         }
         return writer;
     };
+
+    // DECODE: el proto estático de rc.9 desconoce el campo 26, así que al
+    // RECIBIR un sticker con sonido de verdad el audio se descarta. Este
+    // wrapper decodifica normal y luego escanea los bytes crudos buscando el
+    // campo 26; si está, reatacha el AudioMessage al objeto decodificado.
+    // Con esto el bot puede ver y comparar el formato exacto que WhatsApp
+    // manda en sus stickers con sonido reales.
+    const decodeOriginal = StickerMessage.decode;
+    StickerMessage.decode = function (reader, end) {
+        // La posición y el límite hay que capturarlos ANTES de decodificar:
+        // decodeOriginal consume el Reader hasta el final, y si se leen
+        // después el escaneo arranca en el byte final y nunca ve el campo 26.
+        const buf = reader && reader.buf ? reader.buf : reader;
+        const desde = reader && typeof reader.pos === 'number' ? reader.pos : 0;
+        const hasta = typeof end === 'number' ? end : (buf ? buf.length : 0);
+        const mensaje = decodeOriginal.apply(this, arguments);
+        try {
+            if (buf && buf.length && hasta > desde && !mensaje.audioMessage) {
+                const audio = extraerAudioAnidado(buf, desde, hasta);
+                if (audio) mensaje.audioMessage = audio;
+            }
+        } catch (e) { }
+        return mensaje;
+    };
+}
+
+// Escanea los bytes de un StickerMessage buscando el campo 26 (AudioMessage)
+// y lo devuelve decodificado, o null.
+function extraerAudioAnidado(buf, desde, hasta) {
+    const Reader = require('protobufjs').Reader;
+    const r = Reader.create(buf);
+    r.pos = desde;
+    r.len = hasta;
+    while (r.pos < r.len) {
+        const tag = r.uint32();
+        const field = tag >>> 3, wire = tag & 7;
+        if (field === CAMPO_AUDIO && wire === 2) {
+            const len = r.uint32();
+            const sub = buf.subarray(r.pos, r.pos + len);
+            r.pos += len;
+            return proto.Message.AudioMessage.decode(sub);
+        }
+        if (wire !== 2) { r.skipType(wire); continue; }
+        // OJO: hay que leer el largo PRIMERO y sumarlo a la posición que ya
+        // quedó después del varint. `r.pos += r.uint32()` suma el largo a la
+        // posición ANTERIOR y queda 1 byte corrido (nunca encontraba el 26).
+        const len = r.uint32();
+        r.pos += len;
+    }
+    return null;
 }
 
 parchearProtoSonido();
@@ -66,6 +116,7 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
     const tmpOgg = path.join(os.tmpdir(), `stk_info_out_${uid}.ogg`);
     const tmpPcm = path.join(os.tmpdir(), `stk_info_out_${uid}.pcm`);
     fs.writeFileSync(tmpIn, buffer);
+    let ogg = null;
     try {
         // UN solo pase con DOS salidas: OGG/Opus (para subir) y PCM 8 kHz mono
         // (para duración y waveform). Antes eran dos pases encadenados; el
@@ -78,48 +129,47 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
             '-vn', '-map', '0:a:0?', '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '32k', '-application', 'audio', '-t', String(tope), '-f', 'ogg', '-y', tmpOgg,
             '-vn', '-map', '0:a:0?', '-f', 's16le', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '8000', '-t', String(tope), '-y', tmpPcm
         ], { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 });
-        const ogg = fs.readFileSync(tmpOgg);
+        ogg = fs.readFileSync(tmpOgg);
         if (!ogg.length) return null;
         const pcm = fs.readFileSync(tmpPcm);
         const muestras = Math.floor(pcm.length / 2);
         if (muestras < 100) return { buffer: ogg, segundos: 0, waveform: null };
-        // 63 picos de amplitud normalizados a 5 bits (0-31), igual que wa-js.
-        const N = 63;
+        // Formato REAL de WhatsApp (el mismo que usa Baileys para las notas de
+        // voz): 64 bytes, cada uno una muestra de amplitud entre 0 y 100.
+        // NO va empaquetado a 5 bits: el cliente lee 64 bytes directos y un
+        // buffer de 40 bytes le rompe la reproducción ("no se pudo reproducir").
+        const N = 64;
         const paso = Math.floor(muestras / N);
-        const picos = [];
+        const promedios = [];
         for (let i = 0; i < N; i++) {
-            let max = 0;
+            let suma = 0;
             const base = i * paso * 2;
             for (let j = 0; j < paso * 2; j += 2) {
-                const v = Math.abs(pcm.readInt16LE(base + j));
-                if (v > max) max = v;
+                suma += Math.abs(pcm.readInt16LE(base + j));
             }
-            picos.push(Math.min(31, Math.round((max / 32767) * 31)));
+            promedios.push(paso ? suma / paso : 0);
         }
-        if (!picos.some(v => v > 0)) {
-            // Audio mudo o demasiado bajo: una waveform AUSENTE hace que el
-            // cliente falle al reproducir el sonido del sticker ("no se pudo
-            // reproducir"). Se manda una waveform mínima plana (todo a 1).
-            for (let i = 0; i < N; i++) picos[i] = 1;
+        const maxPromedio = Math.max(...promedios);
+        const waveform = Buffer.alloc(N);
+        for (let i = 0; i < N; i++) {
+            // Audio mudo o demasiado bajo: una waveform de puros ceros deja el
+            // sticker sin forma de onda visible. Se usa 1 como mínimo.
+            waveform[i] = maxPromedio > 0
+                ? Math.min(100, Math.max(0, Math.round((promedios[i] / maxPromedio) * 100)))
+                : 1;
         }
-        // Empaquetado 5-bit LSB-first: 8 muestras por 5 bytes (315 bits -> 40 bytes).
-        const bytes = [];
-        let bits = 0, nbits = 0;
-        for (const v of picos) {
-            bits |= v << nbits;
-            nbits += 5;
-            while (nbits >= 8) { bytes.push(bits & 0xFF); bits >>= 8; nbits -= 8; }
-        }
-        if (nbits > 0) bytes.push(bits & 0xFF);
         return {
             buffer: ogg,
             segundos: muestras / 8000,
-            waveform: Buffer.from(bytes)
+            waveform
         };
     } catch (e) {
         // Si el pase de PCM falla, al menos devolvemos el audio; el caller
         // pone un seconds razonable y el sticker viaja sin waveform.
-        return { buffer: ogg, segundos: 0, waveform: null };
+        // Sin pista de audio (video mudo) es normal: no se avisa. Si el OGG
+        // sí salió pero falló el PCM, se conserva el audio y se avisa.
+        if (ogg) console.warn('[STICKER-SONIDO] prepararAudioParaSticker falló:', e.message);
+        return ogg ? { buffer: ogg, segundos: 0, waveform: null } : null;
     } finally {
         try { fs.unlinkSync(tmpIn); } catch (e) { }
         try { fs.unlinkSync(tmpOgg); } catch (e) { }
