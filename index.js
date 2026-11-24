@@ -26,6 +26,7 @@ const { promisify } = require('util');
 
 const db = require('./database');
 const { useTursoAuthState } = require('./turso-auth');
+const { agregarExifSticker } = require('./utils/stickerExif');
 const handler = require('./commandHandler');
 const { handleGameResponse } = require('./gameResponder');
 const { handleMangaSession } = require('./mangaResponder');
@@ -899,12 +900,15 @@ async function convertirAWebp(buffer, isVideo = false) {
     // Se arranca directo por la ruta correcta según el contenido real del buffer.
     const animado = isVideo || esBufferAnimado(buffer);
     try {
-        return await intentar(animado);
+        const webp = await intentar(animado);
+        // Metadatos del pack (link del Discord) para todo sticker que crea el bot.
+        return await agregarExifSticker(webp);
     } catch (e) {
         // Respaldo: si falló y todavía no probamos la otra ruta, se prueba UNA vez.
         try {
             console.warn(`[Sticker] Reintentando como ${animado ? 'imagen' : 'animado'}:`, e.message);
-            return await intentar(!animado);
+            const webp2 = await intentar(!animado);
+            return await agregarExifSticker(webp2);
         } catch (e2) {
             console.error('❌ [Sticker]', e2.message);
             return null;

@@ -4,6 +4,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
+const { agregarExifSticker } = require('../utils/stickerExif');
 
 module.exports = {
     name: 'fun',
@@ -120,7 +121,9 @@ module.exports = {
                 ];
                 await execFileAsync(FFMPEG, argsF, { timeout: 10000, windowsHide: true });
                 const webp = fs.readFileSync(tmpOut);
-                if (webp) await sock.sendMessage(chatId, { sticker: webp }, { quoted: msg });
+                // Metadatos del pack (link del Discord) también en el sticker de texto.
+                const webpExif = await agregarExifSticker(webp);
+                if (webpExif) await sock.sendMessage(chatId, { sticker: webpExif }, { quoted: msg });
             } catch (e) {
                 console.error('❌ [!v]', e.message);
                 await sock.sendMessage(chatId, { text: '❌ Error al crear sticker de texto.' }, { quoted: msg });
