@@ -15,15 +15,26 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
-const { proto } = require('@whiskeysockets/baileys');
+const crypto = require('crypto');
+const { proto, getMediaKeys } = require('@whiskeysockets/baileys');
 const pkg = require('protobufjs');
-const { Reader } = pkg;
-const { enviarStickerConSonido, prepararAudioParaSticker, TAG_AUDIO } = require('../utils/stickerSonido');
+const { Reader, Writer } = pkg;
+const {
+    enviarStickerConSonido,
+    prepararAudioParaSticker,
+    validarOggOpus,
+    calcularWaveformDesdePcm,
+    calcularStreamingSidecar,
+    dimensionesWebp,
+    TAG_AUDIO
+} = require('../utils/stickerSonido');
 const { extraerAudioSticker } = require('../utils/media');
 const { execute } = require('../commands/main');
 
 const RAIZ = path.join(__dirname, '..');
 const STICKER = path.join(RAIZ, 'sticker_bienvenida.webp');
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const TIENE_FFMPEG = spawnSync(FFMPEG, ['-version'], { windowsHide: true }).status === 0;
 
 function leerAudioDelMensaje(message) {
     const buf = proto.Message.encode(message).finish();
@@ -243,20 +254,22 @@ function sockFalso({ fallaUpload = false } = {}) {
     // igual que toda nota de voz de WhatsApp. Antes Baileys dejaba waveform
     // fuera (audio-decode no instalado) y el cliente no reproducía el sonido.
     await probar('audio embebido lleva seconds y waveform reales (regresión tap-error)', async () => {
-        const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
-        const { execFileSync } = require('child_process');
+        if (!TIENE_FFMPEG) {
+            console.log('   (saltado: ffmpeg no está disponible)');
+            return;
+        }
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk_reg_'));
         const video = path.join(dir, 'v.mp4');
-        execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=256x256:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '3', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-y', video], { stdio: 'pipe' });
+        execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=256x256:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '3', '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-y', video], { stdio: 'pipe' });
         try {
-            const info = await prepararAudioParaSticker(fs.readFileSync(video), ffmpeg, 6);
+            const info = await prepararAudioParaSticker(fs.readFileSync(video), FFMPEG, 6);
             assert.ok(info && info.buffer.length > 100, 'extrae OGG');
             assert.ok(info.segundos >= 1 && info.segundos <= 6.5, 'segundos reales, fue ' + info.segundos);
             assert.ok(info.waveform && info.waveform.length === 64, 'waveform 64 bytes (una muestra 0-100 por byte), fue ' + (info.waveform && info.waveform.length));
             assert.ok([...info.waveform].every(v => v >= 0 && v <= 100), 'cada muestra de waveform debe estar entre 0 y 100');
             // E2E: el mensaje final lleva esos campos dentro del campo 26.
             const { sock, estado } = sockFalso();
-            await enviarStickerConSonido(sock, '123@s.whatsapp.net', fs.readFileSync(STICKER), info, null, ffmpeg);
+            await enviarStickerConSonido(sock, '123@s.whatsapp.net', fs.readFileSync(STICKER), info, null, FFMPEG);
             const audio = leerAudioDelMensaje(estado.capturado);
             assert.ok(audio, 'el mensaje lleva el campo 26');
             assert.ok(Number(audio.seconds) >= 1, 'seconds >= 1, fue ' + audio.seconds);
@@ -289,19 +302,151 @@ function sockFalso({ fallaUpload = false } = {}) {
     // REGRESION del 'no se pudo reproducir el sonido': audio mudo mandaba
     // waveform null; ahora lleva una waveform minima plana SIEMPRE.
     await probar('audio mudo lleva waveform plana (no null)', async () => {
-        const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
-        const { execFileSync } = require('child_process');
+        if (!TIENE_FFMPEG) {
+            console.log('   (saltado: ffmpeg no está disponible)');
+            return;
+        }
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk_mudo_'));
         const ogg = path.join(dir, 'mudo.ogg');
-        execFileSync(ffmpeg, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono', '-t', '2', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', '-y', ogg], { stdio: 'pipe' });
+        execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono', '-t', '2', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', '-y', ogg], { stdio: 'pipe' });
         try {
-            const info = await prepararAudioParaSticker(fs.readFileSync(ogg), ffmpeg, 6);
+            const info = await prepararAudioParaSticker(fs.readFileSync(ogg), FFMPEG, 6);
             assert.ok(info && info.buffer.length > 100, 'extrae OGG');
             assert.ok(info.waveform && info.waveform.length === 64, 'waveform de 64 bytes aun siendo mudo, fue ' + (info.waveform && info.waveform.length));
         } finally {
             try { fs.unlinkSync(ogg); } catch (e) {}
             try { fs.rmdirSync(dir); } catch (e) {}
         }
+    });
+
+    await probar('sticker anidado en quotedMessage/ephemeral recupera campo 26 al decodificar', async () => {
+        const anidado = proto.Message.create({
+            ephemeralMessage: {
+                message: {
+                    extendedTextMessage: {
+                        text: 'x'.repeat(200),
+                        contextInfo: {
+                            quotedMessage: {
+                                stickerMessage: {
+                                    url: 'https://mmg/s',
+                                    mimetype: 'image/webp',
+                                    audioMessage: {
+                                        url: 'https://mmg/a',
+                                        directPath: '/v/t62/a',
+                                        mimetype: 'audio/ogg; codecs=opus',
+                                        ptt: true,
+                                        seconds: 5,
+                                        waveform: Buffer.alloc(64, 12)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        const bytes = proto.Message.encode(anidado).finish();
+        const dec = proto.Message.decode(bytes);
+        const qStk = dec.ephemeralMessage?.message?.extendedTextMessage?.contextInfo?.quotedMessage?.stickerMessage;
+        assert.ok(qStk?.audioMessage, 'audioMessage debe recuperarse dentro de sticker anidado');
+        assert.strictEqual(qStk.audioMessage.seconds, 5);
+    });
+
+    await probar('campo top-level 134 (audioStickerMessage) se desenvuelve a stickerMessage al decodificar', async () => {
+        const innerMsg = proto.Message.encode(proto.Message.create({
+            stickerMessage: {
+                url: 'https://mmg/s134',
+                mimetype: 'image/webp',
+                audioMessage: {
+                    url: 'https://mmg/a134',
+                    directPath: '/v/t62/a134',
+                    mimetype: 'audio/ogg; codecs=opus',
+                    seconds: 4
+                }
+            }
+        })).finish();
+        const fpBytes = Writer.create().uint32((1 << 3) | 2).bytes(innerMsg).finish();
+        const topBytes = Writer.create().uint32((134 << 3) | 2).bytes(fpBytes).finish();
+        const dec = proto.Message.decode(topBytes);
+        assert.ok(dec.stickerMessage, 'debe exponer stickerMessage desde campo 134');
+        assert.ok(dec.stickerMessage.audioMessage, 'debe recuperar audioMessage dentro de campo 134');
+        assert.strictEqual(dec.stickerMessage.audioMessage.seconds, 4);
+    });
+
+    await probar('subida nunca lee el archivo cifrado antes de que Baileys lo termine de escribir', async () => {
+        const { sock, estado } = sockFalso();
+        let verificaciones = 0;
+        sock.waUploadToServer = async (filePath, { fileEncSha256B64 }) => {
+            const bytes = fs.readFileSync(filePath);
+            const hash = crypto.createHash('sha256').update(bytes).digest('base64');
+            assert.strictEqual(hash, fileEncSha256B64, 'el archivo cifrado en disco debe estar completo antes de subirlo');
+            verificaciones++;
+            return { mediaUrl: 'https://mmg.whatsapp.net/d/ok', directPath: '/v/t62/ok' };
+        };
+        const stickerBuf = fs.readFileSync(STICKER);
+        const audioBuf = Buffer.alloc(15000, 7);
+        for (let i = 0; i < 8; i++) {
+            const res = await enviarStickerConSonido(sock, '123@s.whatsapp.net', stickerBuf, {
+                buffer: audioBuf,
+                segundos: 4,
+                waveform: Buffer.alloc(64, 25)
+            }, null);
+            assert.ok(res, 'envio #' + i + ' debe completar');
+        }
+        assert.strictEqual(verificaciones, 16, 'las 16 subidas deben recibir el archivo cifrado integro');
+        assert.strictEqual(estado.relay, 8);
+    });
+
+    await probar('stickerMessage y audioMessage llevan metadatos y streamingSidecar validos', async () => {
+        const { sock, estado } = sockFalso();
+        let ultimoEncAudio = null;
+        sock.waUploadToServer = async (filePath, { mediaType }) => {
+            if (mediaType === 'audio') ultimoEncAudio = fs.readFileSync(filePath);
+            return { mediaUrl: 'https://mmg.whatsapp.net/d/ok', directPath: '/v/t62/ok' };
+        };
+        const stickerBuf = fs.readFileSync(STICKER);
+        const res = await enviarStickerConSonido(sock, '123@s.whatsapp.net', stickerBuf, {
+            buffer: Buffer.alloc(4096, 3),
+            segundos: 3,
+            waveform: Buffer.alloc(64, 42)
+        }, null);
+        assert.ok(res, 'debe enviar el mensaje');
+        const dimsEsperadas = dimensionesWebp(stickerBuf);
+        const stk = estado.capturado.stickerMessage;
+        assert.strictEqual(stk.width, dimsEsperadas.width, 'width debe coincidir con el WebP');
+        assert.strictEqual(stk.height, dimsEsperadas.height, 'height debe coincidir con el WebP');
+        assert.strictEqual(stk.isAnimated, false, 'sticker_bienvenida es estatico');
+        assert.ok(Number(stk.stickerSentTs) > 0, 'stickerSentTs debe ir presente');
+        const audio = leerAudioDelMensaje(estado.capturado);
+        assert.ok(audio.streamingSidecar && audio.streamingSidecar.length === 10, 'streamingSidecar de 10 bytes para <64KB');
+        const { iv, macKey } = await getMediaKeys(audio.mediaKey, 'audio');
+        const esperadoSidecar = crypto.createHmac('sha256', macKey).update(iv).update(ultimoEncAudio).digest().subarray(0, 10);
+        assert.deepStrictEqual(Buffer.from(audio.streamingSidecar), esperadoSidecar, 'streamingSidecar debe coincidir con HMAC(macKey, iv + enc)');
+    });
+
+    await probar('validarOggOpus rechaza OGG sin frames de audio y acepta OGG/Opus valido', () => {
+        assert.strictEqual(typeof validarOggOpus, 'function', 'debe exportar validarOggOpus');
+        const crearPaginaOgg = (payload) => {
+            const hdr = Buffer.alloc(28, 0);
+            hdr.write('OggS', 0, 'latin1');
+            hdr[26] = 1;
+            hdr[27] = payload.length;
+            return Buffer.concat([hdr, payload]);
+        };
+        const soloCabeceras = Buffer.concat([
+            crearPaginaOgg(Buffer.concat([Buffer.from('OpusHead'), Buffer.alloc(30, 0)])),
+            crearPaginaOgg(Buffer.concat([Buffer.from('OpusTags'), Buffer.alloc(120, 0)]))
+        ]);
+        assert.strictEqual(validarOggOpus(soloCabeceras), false, 'OGG sin pagina de audio no es reproducible');
+        const valido = Buffer.concat([soloCabeceras, crearPaginaOgg(Buffer.alloc(60, 1))]);
+        assert.strictEqual(validarOggOpus(valido), true, 'OGG con 3+ paginas y OpusHead es valido');
+        assert.strictEqual(validarOggOpus(valido.subarray(0, valido.length - 5)), false, 'OGG truncado debe rechazarse');
+        assert.strictEqual(typeof calcularWaveformDesdePcm, 'function', 'debe exportar calcularWaveformDesdePcm');
+        assert.strictEqual(calcularWaveformDesdePcm(Buffer.alloc(100)), null, 'menos de 160 muestras (<20ms) devuelve null');
+        const wf = calcularWaveformDesdePcm(Buffer.alloc(3200, 1));
+        assert.ok(wf && wf.length === 64, 'devuelve waveform de 64 bytes');
+        assert.strictEqual(typeof calcularStreamingSidecar, 'function', 'debe exportar calcularStreamingSidecar');
+        assert.strictEqual(typeof dimensionesWebp, 'function', 'debe exportar dimensionesWebp');
     });
 
     console.log(fallos === 0 ? '\n🎉 TEST STICKER SONIDO OK' : `\n💥 TEST STICKER SONIDO: ${fallos} fallo(s)`);

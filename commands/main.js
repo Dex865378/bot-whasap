@@ -623,10 +623,10 @@ module.exports = {
                     return sock.sendMessage(chatId, { text: '❌ *No pude convertirlo* (formato raro).\nPrueba con otra imagen o GIF.' });
                 }
 
-                if (audio && audio.buffer && audio.buffer.length) {
+                if (audio && audio.buffer && audio.buffer.length && audio.waveform && audio.waveform.length) {
                     const enviado = await enviarStickerConSonido(sock, chatId, stiker, audio, msg, FFMPEG_PATH);
                     if (enviado) {
-                        console.log(`[STICKER] Enviado con sonido (${Math.round(audio.buffer.length / 1024)} KB, ${Math.round(audio.segundos || 0)}s, waveform: ${audio.waveform ? 'sí' : 'no'}).`);
+                        console.log(`[STICKER] Enviado con sonido (${Math.round(audio.buffer.length / 1024)} KB, ${Math.round(audio.segundos || 0)}s, waveform: ${audio.waveform.length}B).`);
                         return;
                     }
                 }
