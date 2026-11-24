@@ -199,10 +199,16 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Regla**: NUNCA crear un segundo servicio de Render apuntando a este repo. Solo existe `srv-dbr2q6on74is73d60o80` (`bot-manga-whatsapp.onrender.com`). Si el bot "se apaga", es Render Free dormido/suspendido: revisar el dashboard, no crear otro.
 
 ### Sticker con sonido: fix de reproducción + velocidad (v11.4.0, 2026-11-19)
-- **Causa del "toco y sale error"**: el `audioMessage` embebido llegaba **sin `waveform`** (Baileys la calcula con `audio-decode`, peerDependency opcional que no está instalada, y se la salta en silencio). Toda nota de voz real de WhatsApp lleva waveform (63 muestras de 5 bits) y `seconds` > 0. Ahora se genera con ffmpeg en el MISMO pase que extrae el OGG (PCM 8 kHz → picos → empaquetado 5-bit LSB-first) y se fuerza `seconds` >= 1. Test de regresión: `scripts/test-sticker-audio.js` decodifica el campo 26 y exige seconds+waveform.
+- **Causa del "toco y sale error"**: el `audioMessage` embebido llegaba **sin `waveform`** (Baileys la calcula con `audio-decode`, peerDependency opcional que no está instalada, y se la salta en silencio). Toda nota de voz real de WhatsApp lleva waveform y `seconds` > 0 (formato corregido en v11.4.3: ver abajo). Ahora se genera con ffmpeg en el MISMO pase que extrae el OGG (PCM 8 kHz → picos → empaquetado 5-bit LSB-first) y se fuerza `seconds` >= 1. Test de regresión: `scripts/test-sticker-audio.js` decodifica el campo 26 y exige seconds+waveform.
 - **Velocidad `!s`** (tardaba ~10-20 s en Render por el encode WebP en 0.1 vCPU):
   1. Audio y WebP ahora corren **en paralelo** (el audio es liviano, el WebP pesa).
   2. Extracción de audio + PCM de waveform: **un solo pase de ffmpeg con dos salidas** (antes dos pases).
   3. Encode WebP de video: `compression_level 3→1`, `lanczos→bilinear`, `fps 10→8` (~-40% de CPU medida local; los ratios se trasladan a Render).
   - Baseline producción: `!s` promedio 10.4 s (métricas de /health). Comparar después del deploy.
 - **Repo movido**: GitHub ahora es `Dex865378/bot-whasap` (el viejo `bot-manga-whatsapp` queda como remote `github-viejo`).
+
+### Sticker con sonido: waveform real de 64 bytes (v11.4.3, 2026-11-24)
+- **Causa del "no se pudo reproducir el sonido"**: el waveform se generaba con **63 muestras empaquetadas a 5 bits = 40 bytes**, pero WhatsApp (y Baileys en `getAudioWaveform`) espera **64 bytes directos, uno por muestra, con valores 0-100**. Un buffer de 40 bytes no es el formato del campo `AudioMessage.waveform` y el cliente rechaza la reproducción.
+- **Fix**: `prepararAudioParaSticker()` ahora calcula 64 promedios de amplitud del PCM 8 kHz, los normaliza contra el máximo y escribe un byte 0-100 por muestra. Audio mudo queda en 1 (no cero) para conservar una forma de onda mínima.
+- **Decoder de entrada**: el wrapper de `StickerMessage.decode` capturaba `reader.pos` DESPUÉS de decodificar (ya al final), y además el escaneo saltaba un byte con `r.pos += r.uint32()`. Ahora captura posición/límite antes y lee el largo primero. Esto permite ver el `AudioMessage` real de stickers con sonido recibidos (`[SONIDO-DE-VERDAD]` en logs).
+- **Tests**: `scripts/test-sticker-audio.js` exige waveform de 64 bytes con valores 0-100 y que `proto.Message.decode()` recupere el campo 26 de un sticker entrante. Antes del fix ambos fallaban.
