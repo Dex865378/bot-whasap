@@ -65,7 +65,7 @@ function envInt(nombre, porDefecto, minimo = 0) {
 const FAST_COMMANDS = new Set(['!ping']); // !menu excluido para respetar el filtro de manga mode
 const UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker']);
 // --- RATE LIMIT DE STICKERS (anti-ban) ---
-const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 5000, 1000);
+const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 60000, 1000);
 const STICKER_GROUP_PER_MIN = envInt('STICKER_GROUP_PER_MIN', 15, 1);
 const stickerGroupBudget = new Map();
 const PUBLIC_RENDER_URL = process.env.RENDER_EXTERNAL_URL
