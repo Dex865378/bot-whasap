@@ -762,7 +762,7 @@ function sockFalso({ fallaUpload = false } = {}) {
         }
     });
 
-    await probar('clasificarDesconexionAuth maneja 403/419 con backoff y reset al 3er rechazo', async () => {
+    await probar('clasificarDesconexionAuth maneja 403/419 con backoff y shouldStop al 5to rechazo', async () => {
         const { clasificarDesconexionAuth } = require('../turso-auth');
         const dr = { loggedOut: 401, forbidden: 403 };
         const d1 = clasificarDesconexionAuth(403, { errores401: 2, errores403: 0 }, dr);
@@ -777,9 +777,14 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.strictEqual(d2.waitMs, 40000);
 
         const d3 = clasificarDesconexionAuth(403, { errores401: 0, errores403: d2.errores403 }, dr);
-        assert.strictEqual(d3.shouldReset, true);
-        assert.strictEqual(d3.reason, 'forbidden/403');
-        assert.strictEqual(d3.errores403, 0);
+        assert.strictEqual(d3.shouldReset, false, '403 NUNCA debe resetear sesión');
+        assert.ok(!d3.shouldStop, 'iteración 3 aún no detiene');
+        assert.strictEqual(d3.errores403, 3);
+
+        // Iterar hasta shouldStop
+        const d5 = clasificarDesconexionAuth(403, { errores401: 0, errores403: 4 }, dr);
+        assert.strictEqual(d5.shouldReset, false);
+        assert.strictEqual(d5.shouldStop, true, 'iteración 5+ debe detenerse');
 
         const otro = clasificarDesconexionAuth(440, { errores401: 2, errores403: 2 }, dr);
         assert.strictEqual(otro.handled, false);

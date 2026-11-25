@@ -8,6 +8,7 @@
     "worker": "node worker-pc.js",
     "test": "node scripts/smoke-test.js",
     "test-stickers": "node scripts/test-sticker-audio.js",
+    "test-anti-ban": "node scripts/test-anti-ban.js",
     "test-db": "node test-turso.js",
     "reset-session": "node scripts/reset-session.js"
   },

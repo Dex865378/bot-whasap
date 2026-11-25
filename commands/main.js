@@ -616,7 +616,7 @@ module.exports = {
                         return sock.sendMessage(chatId, { text: '⚠️ *Archivo muy pesado* (más de 15MB).\nManda un video más corto o una imagen más liviana.' }, { quoted: msg });
                     }
                     if (res.preuploadedStickerMsg) {
-                        const envio = await enviarStickerPreSubido(sockOriginal || sock, chatId, res.preuploadedStickerMsg, msg);
+                        const envio = await enviarStickerPreSubido(sock, chatId, res.preuploadedStickerMsg, msg);
                         if (envio) {
                             console.log(`[STICKER] Enviado via PC directo (Render solo relayMessage).`);
                             return;

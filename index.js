@@ -64,6 +64,10 @@ function envInt(nombre, porDefecto, minimo = 0) {
 }
 const FAST_COMMANDS = new Set(['!ping']); // !menu excluido para respetar el filtro de manga mode
 const UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker']);
+// --- RATE LIMIT DE STICKERS (anti-ban) ---
+const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 5000, 1000);
+const STICKER_GROUP_PER_MIN = envInt('STICKER_GROUP_PER_MIN', 15, 1);
+const stickerGroupBudget = new Map();
 const PUBLIC_RENDER_URL = process.env.RENDER_EXTERNAL_URL
     || (process.env.RENDER_SERVICE_NAME ? `https://${process.env.RENDER_SERVICE_NAME}.onrender.com` : '');
 const PAIRING_CODE_TTL_MS = envInt('PAIRING_CODE_TTL_MS', 180000, 60000);
@@ -172,6 +176,10 @@ function limpiarCachesMemoria(ttlCooldownMs = 5 * 60 * 1000) {
     for (const [cid, st] of colaSalida.entries()) {
         if (st && st.cola.length === 0 && !st.procesando) { colaSalida.delete(cid); totalLimpiado++; }
     }
+    const ahoraGC = Date.now();
+    for (const [cid, b] of stickerGroupBudget.entries()) {
+        if (ahoraGC - b.windowStart > 120000) { stickerGroupBudget.delete(cid); totalLimpiado++; }
+    }
     return totalLimpiado;
 }
 
@@ -234,7 +242,7 @@ const MAX_COLA_SALIDA = envInt('MAX_COLA_SALIDA', 200, 50); // Cola amplia para 
 // Pausa base entre mensajes del mismo chat. 120ms (~8 msgs/s máx) evita
 // ráfagas de spam que provocan bans/403 de WhatsApp y es 2x más ágil que 250ms.
 // Override sin redeploy: PERF_QUEUE_MIN_MS.
-const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 120, 0);
+const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 1100, 200);
 
 const SEND_MESSAGE_TIMEOUT_MS = envInt('SEND_MESSAGE_TIMEOUT_MS', 25000, 5000);
 
@@ -282,12 +290,20 @@ async function procesarColaSalida(sock, chatId) {
     while (estado.cola.length > 0) {
         const { content, options, resolve, reject } = estado.cola.shift();
         try {
-            const result = await sendMessageConTimeout(sock, chatId, content, options);
+            let result;
+            if (content && content._relay) {
+                result = await Promise.race([
+                    sock.relayMessage(chatId, content._relayMsg, content._relayOpts || {}),
+                    new Promise((_, rej) => setTimeout(() => rej(new Error('relayMessage timeout')), SEND_MESSAGE_TIMEOUT_MS))
+                ]);
+            } else {
+                result = await sendMessageConTimeout(sock, chatId, content, options);
+            }
             estado.lastSendAt = Date.now();
             resolve(result);
         } catch (e) {
             estado.errors++;
-            if (e.message === 'sendMessage timeout') {
+            if (e.message === 'sendMessage timeout' || e.message === 'relayMessage timeout') {
                 marcarChatLento(chatId);
                 console.warn(`[COLA TIMEOUT] Chat ${chatId}: envio tardó mas de ${SEND_MESSAGE_TIMEOUT_MS}ms`);
             }
@@ -295,7 +311,15 @@ async function procesarColaSalida(sock, chatId) {
             if (e?.data === 429 || e?.message?.includes('rate-overlimit')) {
                 await new Promise(r => setTimeout(r, 1000));
                 try {
-                    const result = await sendMessageConTimeout(sock, chatId, content, options);
+                    let result;
+                    if (content && content._relay) {
+                        result = await Promise.race([
+                            sock.relayMessage(chatId, content._relayMsg, content._relayOpts || {}),
+                            new Promise((_, rej) => setTimeout(() => rej(new Error('relayMessage timeout')), SEND_MESSAGE_TIMEOUT_MS))
+                        ]);
+                    } else {
+                        result = await sendMessageConTimeout(sock, chatId, content, options);
+                    }
                     estado.lastSendAt = Date.now();
                     resolve(result);
                 } catch (e2) { reject(e2); }
@@ -303,14 +327,11 @@ async function procesarColaSalida(sock, chatId) {
                 reject(e);
             }
         }
-        // Pausa entre mensajes: turbo si la cola está cargada, conservadora
-        // (250ms) si este chat viene de un timeout/429, normal el resto.
-        let delayMs;
-        if (estado.cola.length > 25) delayMs = 10;      // Ráfaga masiva
-        else if (estado.cola.length > 10) delayMs = 20; // Modo turbo: cola cargada
-        else if (estado.cola.length > 5) delayMs = 35;  // Normal
-        else if (esChatLento(chatId)) delayMs = 250;    // Protección flood
-        else delayMs = QUEUE_MIN_DELAY_MS;              // Base (40ms por defecto)
+        // Pausa entre mensajes: ritmo humano con jitter aleatorio.
+        // Sin modo turbo: WhatsApp banea cuentas que envían >1 msg/s sostenido.
+        const baseDelay = esChatLento(chatId) ? Math.max(QUEUE_MIN_DELAY_MS * 2, 2500) : QUEUE_MIN_DELAY_MS;
+        const jitter = Math.floor(Math.random() * 450);
+        const delayMs = baseDelay + jitter;
         if (estado.cola.length > 0) await new Promise(r => setTimeout(r, delayMs));
     }
 
@@ -351,7 +372,7 @@ function liberarSlotHeavy() {
     }
 }
 let errores401 = 0; // Contador de errores 401 consecutivos (solo nukear después de 5)
-let errores403 = 0; // Contador de errores 403/419 consecutivos (backoff y reset tras 3)
+let errores403 = 0; // Contador de errores 403/419 consecutivos (backoff, pausa tras 5)
 
 // ============================================================
 //              WRITE-BEHIND CACHE (Batching de estadísticas)
@@ -976,7 +997,12 @@ const stickerPool = new StickerPool({
 });
 
 const httpServer = http.createServer(dashboardHandler).listen(PORT, '0.0.0.0', () => console.log(`🌐 Dashboard en puerto ${PORT}`));
-stickerPool.attachServer(httpServer);
+if (process.env.ALLOW_PC_WORKER === '1') {
+    stickerPool.attachServer(httpServer);
+    console.log('🔌 [PC Worker] WebSocket habilitado (ALLOW_PC_WORKER=1)');
+} else {
+    console.log('🔒 [PC Worker] WebSocket deshabilitado (ALLOW_PC_WORKER != 1)');
+}
 
 // AUTO-DESPERTADOR (anti-sleep de Render Free): Render duerme el servicio a
 // los 15 min sin tráfico entrante. Un ping interno cada 10 min cuenta como
@@ -1314,6 +1340,10 @@ async function startBot() {
                     console.log(`🚪 Sesión rechazada (${authDecision.reason}). Limpiando credenciales para generar QR nuevo...`);
                     botState.seConectoAlgunaVez = false;
                     await resetAuthSession(authDecision.reason);
+                } else if (authDecision.shouldStop) {
+                    console.log(`⛔ ${authDecision.status}`);
+                    botState.status = authDecision.status;
+                    return;
                 } else {
                     console.log(`⚠️ Desconexión auth: ${authDecision.status}`);
                 }
@@ -1913,7 +1943,7 @@ async function procesarMensaje(sock, msg) {
                 '!patear', '!celebrar', '!aburrido', '!risa', '!smug', '!stare',
                 '!tag', '!reglas', '!setreglas', '!borrareglas', '!kick', '!adm', '!promover', '!bot', '!bienvenida', '!setbienvenida', '!despedida', '!setdespedida', '!setportada', '!setsticker', '!news', '!broadcast', '!anuncio', '!sorteo', '!rifa',
                 '!tienda', '!comprar', '!vender', '!inventario', '!mejor', '!bounty', '!regalar', '!regalaritem', '!dar',
-                '!antispam', '!mododios', '!remoto', '!autoadmin', '!antifarma',
+                '!antispam', '!mododios', '!remoto', '!autoadmin', '!antifarma', '!reacciones',
                 '!prestigio', '!loteria', '!clase', '!trivia', '!daily', '!w', '!slut', '!robar', '!canjear',
                 '!subastar', '!subastas', '!ofertar',
                 '!waifus', '!mascotas', '!alimentar', '!casar', '!proponer', '!logros', '!tareas',
@@ -1938,6 +1968,9 @@ async function procesarMensaje(sock, msg) {
                         if (prop === 'sendMessage') {
                             return (jid, content, opts) => sendMessageConTimeout(target, jid, content, opts);
                         }
+                        if (prop === 'relayMessage') {
+                            return (jid, message, opts) => enviarConCola(target, jid, { _relay: true, _relayMsg: message, _relayOpts: opts }, {});
+                        }
                         return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
                     }
                 });
@@ -1956,9 +1989,29 @@ async function procesarMensaje(sock, msg) {
                 }
             }
 
+            // --- RATE LIMIT DE STICKERS (anti-ban): 1 cada 5s por usuario, máx N/min por grupo ---
+            if (esStickerIlimitado && !isGlobalAdmin) {
+                const stickerWait = verificarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);
+                if (stickerWait > 0) return;
+                if (isGroup) {
+                    const ahora = Date.now();
+                    let budget = stickerGroupBudget.get(chatId);
+                    if (!budget || ahora - budget.windowStart > 60000) {
+                        budget = { count: 0, windowStart: ahora };
+                        stickerGroupBudget.set(chatId, budget);
+                    }
+                    if (budget.count >= STICKER_GROUP_PER_MIN) {
+                        if (verificarCooldown(chatId, 'sticker-limit-notice', 30000) === 0) {
+                            sock.sendMessage(chatId, { text: '⏳ *Límite de stickers por minuto alcanzado.* Espera unos segundos.' }, { quoted: msg }).catch(() => {});
+                        }
+                        return;
+                    }
+                    budget.count++;
+                }
+            }
+
             // --- COOLDOWN GLOBAL (anti-spam / anti rate-limit de WhatsApp) ---
-            // Admins y !s/!sticker: sin cooldown global
-            const cooldownMs = (isAdmin || esStickerIlimitado) ? 0 : 300;
+            const cooldownMs = isAdmin ? 0 : 300;
             if (cooldownMs > 0) {
                 const globalWait = verificarCooldown(sender, 'global', cooldownMs);
                 if (globalWait > 0) {
@@ -2131,7 +2184,8 @@ async function procesarMensaje(sock, msg) {
 
                 // Omitir reacciones cosméticas bajo ráfaga para no duplicar envíos Signal al grupo
                 const colaChatSize = colaSalida.get(chatId)?.cola?.length || 0;
-                const enviarReaccionCosmetica = !esChatLento(chatId) && mensajesEnVuelo <= 3 && colaChatSize < 2 && stickerPool.queue.length < 2;
+                const reaccionesGrupoActivas = !isGroup || (groupConf?.reacciones !== 0);
+                const enviarReaccionCosmetica = reaccionesGrupoActivas && !esChatLento(chatId) && mensajesEnVuelo <= 3 && colaChatSize < 2 && stickerPool.queue.length < 2;
 
                 // Efecto de Grimorio (Solo si no hay ráfaga y es un comando que suele usar economía)
                 if (enviarReaccionCosmetica && ['!menu', '!tienda', '!minar', '!perfil', '!p'].includes(start)) {
@@ -2158,6 +2212,9 @@ async function procesarMensaje(sock, msg) {
                     get(target, prop) {
                         if (prop === 'sendMessage') {
                             return (jid, content, opts) => enviarConCola(target, jid, content, opts);
+                        }
+                        if (prop === 'relayMessage') {
+                            return (jid, message, opts) => enviarConCola(target, jid, { _relay: true, _relayMsg: message, _relayOpts: opts }, {});
                         }
                         return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
                     }

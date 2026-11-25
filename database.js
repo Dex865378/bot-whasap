@@ -160,7 +160,8 @@ async function crearTablas() {
             // Tablas creadas en versiones viejas sin esta columna (el CREATE TABLE
             // IF NOT EXISTS no la agrega a tablas ya existentes en Turso).
             'ALTER TABLE grupos_bienvenida ADD COLUMN mensaje TEXT',
-            'ALTER TABLE actividad ADD COLUMN ultima_actividad BIGINT DEFAULT 0'
+            'ALTER TABLE actividad ADD COLUMN ultima_actividad BIGINT DEFAULT 0',
+            'ALTER TABLE grupos_activados ADD COLUMN reacciones INTEGER DEFAULT 1'
         ];
         for (const sql of allCols) {
             try { await dbClient.execute(sql); } catch (e) { }
@@ -1631,6 +1632,28 @@ async function obtenerFlashStatus(chatId) {
     } catch (e) { return false; }
 }
 
+async function setReacciones(chatId, activar) {
+    if (!connected) return false;
+    try {
+        await dbClient.execute({
+            sql: 'UPDATE grupos_activados SET reacciones = ? WHERE chat_id = ?',
+            args: [activar ? 1 : 0, chatId]
+        });
+        return true;
+    } catch (e) { return false; }
+}
+
+async function getReacciones(chatId) {
+    if (!connected) return 1;
+    try {
+        const rs = await dbClient.execute({
+            sql: 'SELECT reacciones FROM grupos_activados WHERE chat_id = ?',
+            args: [chatId]
+        });
+        return rs.rows[0]?.reacciones ?? 1;
+    } catch (e) { return 1; }
+}
+
 module.exports = {
     init, isConnected: () => connected, nukeSession,
     getAuthKey, getAuthKeys, getAllAuthKeys, saveAuthKey, deleteAuthKey, saveAuthKeysBatch,
@@ -1658,5 +1681,6 @@ module.exports = {
     getMascotasUsuario, getMascotaPrincipal, getCantidadMascota, agregarMascota,
     setPrincipalMascota, alimentarMascota, activarEscudoMascota, tieneEscudoActivo,
     getMascotasPaginadas,
-    alternarFlash, obtenerFlashStatus, obtenerGruposConFlash
+    alternarFlash, obtenerFlashStatus, obtenerGruposConFlash,
+    setReacciones, getReacciones
 };

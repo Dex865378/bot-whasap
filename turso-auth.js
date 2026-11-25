@@ -300,26 +300,29 @@ function clasificarDesconexionAuth(code, counters = {}, disconnectReason = {}) {
         };
     }
 
-    // 403/419 (forbidden): esperar con backoff y, si persiste 3 veces seguidas,
-    // resetear sesión para emitir un QR nuevo sin martillar WhatsApp cada 8s.
+    // 403/419 (forbidden): backoff gradual, NUNCA borrar sesión automáticamente.
+    // Tras 5 intentos seguidos, dejar de reintentar (shouldStop) y esperar
+    // reinicio manual desde el dashboard.
     const next = c403 + 1;
-    if (next >= 3) {
+    if (next >= 5) {
         return {
             handled: true,
-            shouldReset: true,
+            shouldReset: false,
+            shouldStop: true,
             reason: `forbidden/${code}`,
-            waitMs: 15000,
-            status: `Sesión rechazada (${code}). Generando nuevo QR (revisa Dispositivos vinculados en tu WhatsApp)...`,
+            waitMs: 0,
+            status: `⛔ Error ${code} persistente — reinicia manualmente cuando el número esté habilitado`,
             errores401: 0,
-            errores403: 0,
+            errores403: next,
         };
     }
     const waitMs = Math.min(next * 20000, 60000);
     return {
         handled: true,
         shouldReset: false,
+        shouldStop: false,
         waitMs,
-        status: `Error ${code} (${next}/3). Reintentando en ${Math.round(waitMs / 1000)}s...`,
+        status: `Error ${code} (${next}/5). Reintentando en ${Math.round(waitMs / 1000)}s...`,
         errores401: 0,
         errores403: next,
     };
