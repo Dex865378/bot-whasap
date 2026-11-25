@@ -161,7 +161,7 @@ async function crearTablas() {
             // IF NOT EXISTS no la agrega a tablas ya existentes en Turso).
             'ALTER TABLE grupos_bienvenida ADD COLUMN mensaje TEXT',
             'ALTER TABLE actividad ADD COLUMN ultima_actividad BIGINT DEFAULT 0',
-            'ALTER TABLE grupos_activados ADD COLUMN reacciones INTEGER DEFAULT 1'
+            'ALTER TABLE grupos_activados ADD COLUMN reacciones INTEGER DEFAULT 0'
         ];
         for (const sql of allCols) {
             try { await dbClient.execute(sql); } catch (e) { }
@@ -204,6 +204,15 @@ async function crearTablas() {
                     sql: 'INSERT INTO migraciones (nombre, aplicada_en) VALUES (?, ?)',
                     args: ['actividad_backfill_v1', ahora]
                 });
+            }
+        } catch (_) {}
+        try {
+            const migName = 'reacciones_off_default_v1';
+            const ya = await dbClient.execute({ sql: 'SELECT 1 FROM migraciones WHERE nombre = ?', args: [migName] });
+            if (ya.rows.length === 0) {
+                await dbClient.execute('UPDATE grupos_activados SET reacciones = 0 WHERE reacciones = 1');
+                await dbClient.execute({ sql: 'INSERT INTO migraciones (nombre, aplicada_en) VALUES (?, ?)', args: [migName, Date.now()] });
+                console.log('📦 [DB] Migración reacciones_off_default_v1 aplicada.');
             }
         } catch (_) {}
 

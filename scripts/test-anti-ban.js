@@ -205,31 +205,32 @@ const assert = require('assert');
     });
 
     // ── reacciones: check groupConf guard ──
-    await probar('reaccionesGrupoActivas: undefined !== 0 → true (retrocompat)', async () => {
-        const groupConf = { active: { chat_id: 'x' } }; // sin campo reacciones
+    await probar('reaccionesGrupoActivas: undefined → false (off por defecto)', async () => {
+        const groupConf = { active: { chat_id: 'x' } };
         const isGroup = true;
-        const reaccionesGrupoActivas = !isGroup || (groupConf?.reacciones !== 0);
-        assert.strictEqual(reaccionesGrupoActivas, true, 'grupo sin campo reacciones debe tener reacciones activas');
+        const reaccionesGrupoActivas = isGroup && groupConf?.reacciones === 1;
+        assert.strictEqual(reaccionesGrupoActivas, false, 'grupo sin campo reacciones debe tener reacciones OFF');
     });
 
     await probar('reaccionesGrupoActivas: reacciones=0 → false', async () => {
         const groupConf = { active: { chat_id: 'x' }, reacciones: 0 };
         const isGroup = true;
-        const reaccionesGrupoActivas = !isGroup || (groupConf?.reacciones !== 0);
+        const reaccionesGrupoActivas = isGroup && groupConf?.reacciones === 1;
         assert.strictEqual(reaccionesGrupoActivas, false, 'grupo con reacciones=0 debe desactivar reacciones');
     });
 
-    await probar('reaccionesGrupoActivas: reacciones=1 → true', async () => {
+    await probar('reaccionesGrupoActivas: reacciones=1 → true (activado explícito)', async () => {
         const groupConf = { active: { chat_id: 'x' }, reacciones: 1 };
         const isGroup = true;
-        const reaccionesGrupoActivas = !isGroup || (groupConf?.reacciones !== 0);
+        const reaccionesGrupoActivas = isGroup && groupConf?.reacciones === 1;
         assert.strictEqual(reaccionesGrupoActivas, true, 'grupo con reacciones=1 debe activar reacciones');
     });
 
-    await probar('reaccionesGrupoActivas: chat privado siempre true', async () => {
+    await probar('reaccionesGrupoActivas: chat privado siempre false', async () => {
         const isGroup = false;
-        const reaccionesGrupoActivas = !isGroup || false;
-        assert.strictEqual(reaccionesGrupoActivas, true, 'DM siempre debe tener reacciones');
+        const groupConf = { reacciones: 1 };
+        const reaccionesGrupoActivas = isGroup && groupConf?.reacciones === 1;
+        assert.strictEqual(reaccionesGrupoActivas, false, 'DM nunca debe tener reacciones');
     });
 
     // ── Archivo reacciones.js carga sin error ──

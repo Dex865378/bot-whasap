@@ -2184,7 +2184,7 @@ async function procesarMensaje(sock, msg) {
 
                 // Omitir reacciones cosméticas bajo ráfaga para no duplicar envíos Signal al grupo
                 const colaChatSize = colaSalida.get(chatId)?.cola?.length || 0;
-                const reaccionesGrupoActivas = !isGroup || (groupConf?.reacciones !== 0);
+                const reaccionesGrupoActivas = isGroup && groupConf?.reacciones === 1;
                 const enviarReaccionCosmetica = reaccionesGrupoActivas && !esChatLento(chatId) && mensajesEnVuelo <= 3 && colaChatSize < 2 && stickerPool.queue.length < 2;
 
                 // Efecto de Grimorio (Solo si no hay ráfaga y es un comando que suele usar economía)
