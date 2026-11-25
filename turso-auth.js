@@ -48,6 +48,7 @@ async function useTursoAuthState() {
     let flushInFlight = null;
     let credsDirty = false;
     let credsTimer = null;
+    let cancelled = false;
 
     function cacheSet(dbKey, value) {
         if (memCache.has(dbKey)) memCache.delete(dbKey);
@@ -85,17 +86,18 @@ async function useTursoAuthState() {
 
     async function writeCredsNow() {
         if (credsTimer) { clearTimeout(credsTimer); credsTimer = null; }
-        if (!credsDirty) return;
+        if (cancelled || !credsDirty) return;
         credsDirty = false;
         try {
             await db.saveAuthKey('creds', JSON.stringify(creds, BufferJSON.replacer));
         } catch (e) {
-            credsDirty = true;
+            if (!cancelled) credsDirty = true;
             console.error('❌ [Auth] Error crítico al guardar credenciales:', e.message);
         }
     }
 
     function saveCreds() {
+        if (cancelled) return Promise.resolve();
         credsDirty = true;
         if (credsTimer) return Promise.resolve();
         credsTimer = setTimeout(() => {
@@ -108,11 +110,12 @@ async function useTursoAuthState() {
 
     async function flushKeys() {
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        if (cancelled) return;
         if (flushInFlight) return flushInFlight;
         if (pendingWrites.size === 0) return;
 
         flushInFlight = (async () => {
-            while (pendingWrites.size > 0) {
+            while (!cancelled && pendingWrites.size > 0) {
                 const snapshot = [...pendingWrites.entries()];
                 pendingWrites.clear();
                 inFlightWrites.clear();
@@ -138,7 +141,7 @@ async function useTursoAuthState() {
                 }
                 inFlightWrites.clear();
 
-                if (!ok) {
+                if (!ok && !cancelled) {
                     // Re-encolar las entradas que no fueron pisadas durante el envío
                     for (const [k, item] of snapshot) {
                         if (!pendingWrites.has(k)) pendingWrites.set(k, item);
@@ -154,6 +157,7 @@ async function useTursoAuthState() {
     }
 
     function scheduleFlush() {
+        if (cancelled) return;
         if (pendingWrites.size >= 80) {
             flushKeys().catch(() => { });
             return;
@@ -167,7 +171,19 @@ async function useTursoAuthState() {
     }
 
     async function flush() {
+        if (cancelled) return;
         await Promise.allSettled([writeCredsNow(), flushKeys()]);
+    }
+
+    // Evita que escrituras diferidas resuciten credenciales viejas tras resetAuthSession().
+    function cancelPending() {
+        cancelled = true;
+        credsDirty = false;
+        if (credsTimer) { clearTimeout(credsTimer); credsTimer = null; }
+        if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+        pendingWrites.clear();
+        inFlightWrites.clear();
+        memCache.clear();
     }
 
     return {
@@ -238,8 +254,75 @@ async function useTursoAuthState() {
             }
         },
         saveCreds,
-        flush
+        flush,
+        cancelPending
     };
 }
 
-module.exports = { useTursoAuthState };
+/**
+ * Clasifica códigos de desconexión no autorizados (401/403/419/loggedOut)
+ * aplicando backoff gradual antes de invalidar credenciales en Turso.
+ */
+function clasificarDesconexionAuth(code, counters = {}, disconnectReason = {}) {
+    const c401 = counters.errores401 || 0;
+    const c403 = counters.errores403 || 0;
+    const loggedOutCode = disconnectReason.loggedOut ?? 401;
+    const forbiddenCode = disconnectReason.forbidden ?? 403;
+
+    const es401 = code === loggedOutCode || code === 401;
+    const es403 = code === forbiddenCode || code === 403 || code === 419;
+
+    if (!es401 && !es403) {
+        return { handled: false, shouldReset: false, errores401: 0, errores403: 0 };
+    }
+
+    if (es401) {
+        const next = c401 + 1;
+        if (next >= 5) {
+            return {
+                handled: true,
+                shouldReset: true,
+                reason: 'logout/401',
+                waitMs: 10000,
+                status: 'Reiniciando con sesión limpia...',
+                errores401: 0,
+                errores403: 0,
+            };
+        }
+        const waitMs = Math.min(next * 20000, 60000);
+        return {
+            handled: true,
+            shouldReset: false,
+            waitMs,
+            status: `Error 401 (${next}/5). Reintentando...`,
+            errores401: next,
+            errores403: 0,
+        };
+    }
+
+    // 403/419 (forbidden): esperar con backoff y, si persiste 3 veces seguidas,
+    // resetear sesión para emitir un QR nuevo sin martillar WhatsApp cada 8s.
+    const next = c403 + 1;
+    if (next >= 3) {
+        return {
+            handled: true,
+            shouldReset: true,
+            reason: `forbidden/${code}`,
+            waitMs: 15000,
+            status: `Sesión rechazada (${code}). Generando nuevo QR (revisa Dispositivos vinculados en tu WhatsApp)...`,
+            errores401: 0,
+            errores403: 0,
+        };
+    }
+    const waitMs = Math.min(next * 20000, 60000);
+    return {
+        handled: true,
+        shouldReset: false,
+        waitMs,
+        status: `Error ${code} (${next}/3). Reintentando en ${Math.round(waitMs / 1000)}s...`,
+        errores401: 0,
+        errores403: next,
+    };
+}
+
+module.exports = { useTursoAuthState, clasificarDesconexionAuth };

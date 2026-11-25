@@ -25,7 +25,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 
 const db = require('./database');
-const { useTursoAuthState } = require('./turso-auth');
+const { useTursoAuthState, clasificarDesconexionAuth } = require('./turso-auth');
 const { agregarExifSticker } = require('./utils/stickerExif');
 const { StickerPool } = require('./utils/stickerPool');
 const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto, limpiarTemporalesStickers } = require('./utils/stickerProcessor');
@@ -86,9 +86,11 @@ const nombreWaSync = new Map(); // sender -> timestamp del último chequeo
 const NOMBRE_WA_TTL_MS = 10 * 60 * 1000;
 
 let tursoAuthFlush = null;
+let tursoAuthCancel = null;
 let mensajesEnVuelo = 0;
-const groupMetaCache = new LRUCache(100, 5 * 60 * 1000);
+const groupMetaCache = new LRUCache(100, 30 * 60 * 1000);
 const inflightGroupMeta = new Map();
+const groupMetaStats = { hits: 0, misses: 0, errors: 0, lastError: '' };
 
 function normalizarAdminsMeta(participants) {
     return (participants || [])
@@ -100,14 +102,18 @@ function normalizarAdminsMeta(participants) {
 async function obtenerGroupMetadataCached(sock, chatId) {
     if (!sock || !chatId || !chatId.endsWith('@g.us')) return null;
     const cached = groupMetaCache.get(chatId);
-    if (cached) return cached;
+    if (cached) {
+        groupMetaStats.hits++;
+        return cached;
+    }
+    groupMetaStats.misses++;
     if (inflightGroupMeta.has(chatId)) return inflightGroupMeta.get(chatId);
 
     const p = (async () => {
         try {
             const metadata = await Promise.race([
                 sock.groupMetadata(chatId),
-                new Promise((_, rej) => setTimeout(() => rej(new Error('group-meta-timeout')), 5000))
+                new Promise((_, rej) => setTimeout(() => rej(new Error('group-meta-timeout')), 8000))
             ]);
             if (metadata && Array.isArray(metadata.participants)) {
                 groupMetaCache.set(chatId, metadata);
@@ -116,7 +122,9 @@ async function obtenerGroupMetadataCached(sock, chatId) {
                 }
             }
             return metadata || null;
-        } catch (_) {
+        } catch (err) {
+            groupMetaStats.errors++;
+            groupMetaStats.lastError = (err && err.message) ? err.message.slice(0, 120) : 'unknown';
             return null;
         } finally {
             inflightGroupMeta.delete(chatId);
@@ -223,11 +231,10 @@ global.colaSalida = colaSalida; // Exponer para diagnósticos
 const slowChats = new Map(); // chatId -> timestamp hasta cuando se reducen envios extra
 const MAX_COLA_SALIDA = envInt('MAX_COLA_SALIDA', 200, 50); // Cola amplia para ráfagas sin descartar respuestas
 
-// Pausa base entre mensajes del mismo chat. 250ms fijos hacían que un comando
-// de 4 mensajes (!leer, !perfil) tardara 1s solo en esperas. Ahora la base es
-// baja y el ritmo conservador se activa SOLO si el chat ya falló (esChatLento
-// se marca ante timeout/429). Override sin redeploy: PERF_QUEUE_MIN_MS.
-const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 40, 0);
+// Pausa base entre mensajes del mismo chat. 120ms (~8 msgs/s máx) evita
+// ráfagas de spam que provocan bans/403 de WhatsApp y es 2x más ágil que 250ms.
+// Override sin redeploy: PERF_QUEUE_MIN_MS.
+const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 120, 0);
 
 const SEND_MESSAGE_TIMEOUT_MS = envInt('SEND_MESSAGE_TIMEOUT_MS', 25000, 5000);
 
@@ -343,7 +350,8 @@ function liberarSlotHeavy() {
         next(true);
     }
 }
-let errores401 = 0; // Contador de errores 401 consecutivos (solo nukear después de 3)
+let errores401 = 0; // Contador de errores 401 consecutivos (solo nukear después de 5)
+let errores403 = 0; // Contador de errores 403/419 consecutivos (backoff y reset tras 3)
 
 // ============================================================
 //              WRITE-BEHIND CACHE (Batching de estadísticas)
@@ -575,6 +583,7 @@ const botState = {
     qrAt: 0,
     lastDisconnectCode: null,
     lastDisconnectReason: '',
+    lastDisconnectAt: 0,
     status: 'Iniciando...',
     isConnected: false,
     startTime: Date.now(),
@@ -883,6 +892,12 @@ function dashboardHandler(req, res) {
             stickersPool: { ...stickerPool.getStats(), cacheCleanups: _stickerCleanups },
             inFlightMsgs: mensajesEnVuelo,
             groupMetaCached: groupMetaCache.size,
+            groupMetaStats,
+            lastDisconnect: {
+                code: botState.lastDisconnectCode,
+                reason: botState.lastDisconnectReason,
+                at: botState.lastDisconnectAt || null
+            },
             queues
         });
         return;
@@ -915,6 +930,11 @@ function dashboardHandler(req, res) {
 }
 
 async function resetAuthSession(reason = 'manual reset') {
+    if (tursoAuthCancel) {
+        try { tursoAuthCancel(); } catch (e) { }
+    }
+    tursoAuthFlush = null;
+    tursoAuthCancel = null;
     try { await db.init(); } catch (e) { }
     await db.nukeSession().catch(() => { });
     if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -1028,12 +1048,14 @@ async function startBot() {
         authState = tursoAuth.state;
         saveCreds = tursoAuth.saveCreds;
         tursoAuthFlush = tursoAuth.flush || null;
+        tursoAuthCancel = tursoAuth.cancelPending || null;
     } else {
         console.log('📁 Auth: Local (.bot_session)');
         const local = await useMultiFileAuthState(AUTH_DIR);
         authState = local.state;
         saveCreds = local.saveCreds;
         tursoAuthFlush = null;
+        tursoAuthCancel = null;
     }
 
     // Latido de instancia: permite detectar dos procesos peleando la misma
@@ -1179,6 +1201,7 @@ async function startBot() {
             botState.status = 'Online';
             botState.seConectoAlgunaVez = true; // Marcar que SÍ logró conectarse
             errores401 = 0; // Reset del contador de errores al conectar exitosamente
+            errores403 = 0;
 
             // 🔄 Cargar comandos explícitamente (evita problemas de carga circular)
             handler.loadCommands();
@@ -1276,37 +1299,28 @@ async function startBot() {
             const code = (new Boom(error))?.output?.statusCode;
             botState.lastDisconnectCode = code || null;
             botState.lastDisconnectReason = (error?.message || 'Sin mensaje').slice(0, 180);
+            botState.lastDisconnectAt = Date.now();
             console.log(`🔌 Conexión cerrada. Código: ${code} | Razón: ${error?.message || 'Sin mensaje'}`);
             if (code === 440) {
                 console.log('⚠️ 440 conflict: otra instancia tiene esta misma sesión abierta (2 deploys solapados u otro proceso con la misma cuenta). Esa otra copia debe apagarse o se seguirán pateando.');
             }
 
-            if (code === DisconnectReason.loggedOut || code === 401) {
-                // Punto de mejora: No borrar la sesión al primer fallo 401 si nunca se conectó.
-                // Podría ser un error temporal de red o de Turso.
+            const authDecision = clasificarDesconexionAuth(code, { errores401, errores403 }, DisconnectReason);
+            errores401 = authDecision.errores401;
+            errores403 = authDecision.errores403;
 
-                errores401++;
-                console.log(`⚠️ Desconexión 401/Logout #${errores401}/5`);
-
-                if (errores401 >= 5 || code === DisconnectReason.loggedOut) {
-                    console.log('🚪 Sesión definitivamente muerta o Logout manual. Limpiando...');
-                    errores401 = 0;
+            if (authDecision.handled) {
+                if (authDecision.shouldReset) {
+                    console.log(`🚪 Sesión rechazada (${authDecision.reason}). Limpiando credenciales para generar QR nuevo...`);
                     botState.seConectoAlgunaVez = false;
-                    await resetAuthSession('logout/401');
-                    console.log('🔄 Reiniciando en 10s con sesión limpia...');
-                    scheduleReconnect(10000, 'Reiniciando con sesión limpia...');
-                    return;
+                    await resetAuthSession(authDecision.reason);
+                } else {
+                    console.log(`⚠️ Desconexión auth: ${authDecision.status}`);
                 }
-
-                // Reconectar con espera gradual más larga para proteger la base de datos
-                const waitTime = Math.min(errores401 * 20000, 60000); // Max 1 minuto
-                botState.status = `Error 401 (${errores401}/5). Reintentando...`;
-                scheduleReconnect(waitTime, `Error 401 (${errores401}/5). Reintentando...`);
+                botState.status = authDecision.status;
+                scheduleReconnect(authDecision.waitMs, authDecision.status);
                 return;
             }
-
-            // Resetéar contador de 401 cuando el error es diferente
-            errores401 = 0;
 
             // Si hay código de pairing activo, reconectar SIN borrar nada
             if (botState.pairingCode) {

@@ -750,9 +750,41 @@ function sockFalso({ fallaUpload = false } = {}) {
             assert.strictEqual(batchCalls, 1, 'flush debe agrupar todas las escrituras en 1 batch HTTP');
             assert.strictEqual(batchOpsCount, 1, '10 cambios de misma clave deben colapsarse a 1 operación');
             assert.strictEqual(JSON.parse(store.get('sender-key-memory-g1@g.us')).step, 9);
+
+            // 4. cancelPending evita que timers diferidos resuciten claves tras nukeSession
+            await auth.state.keys.set({ 'sender-key-memory': { 'g1@g.us': { u1: true, step: 99 } } });
+            auth.cancelPending();
+            store.clear();
+            await auth.flush();
+            assert.strictEqual(store.size, 0, 'cancelPending debe descartar escrituras pendientes tras reset');
         } finally {
             Object.assign(dbMod, orig);
         }
+    });
+
+    await probar('clasificarDesconexionAuth maneja 403/419 con backoff y reset al 3er rechazo', async () => {
+        const { clasificarDesconexionAuth } = require('../turso-auth');
+        const dr = { loggedOut: 401, forbidden: 403 };
+        const d1 = clasificarDesconexionAuth(403, { errores401: 2, errores403: 0 }, dr);
+        assert.strictEqual(d1.handled, true);
+        assert.strictEqual(d1.shouldReset, false);
+        assert.strictEqual(d1.errores403, 1);
+        assert.strictEqual(d1.errores401, 0);
+        assert.strictEqual(d1.waitMs, 20000);
+
+        const d2 = clasificarDesconexionAuth(403, { errores401: 0, errores403: d1.errores403 }, dr);
+        assert.strictEqual(d2.shouldReset, false);
+        assert.strictEqual(d2.waitMs, 40000);
+
+        const d3 = clasificarDesconexionAuth(403, { errores401: 0, errores403: d2.errores403 }, dr);
+        assert.strictEqual(d3.shouldReset, true);
+        assert.strictEqual(d3.reason, 'forbidden/403');
+        assert.strictEqual(d3.errores403, 0);
+
+        const otro = clasificarDesconexionAuth(440, { errores401: 2, errores403: 2 }, dr);
+        assert.strictEqual(otro.handled, false);
+        assert.strictEqual(otro.errores401, 0);
+        assert.strictEqual(otro.errores403, 0);
     });
 
     if (TIENE_FFMPEG) {

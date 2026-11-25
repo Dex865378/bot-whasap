@@ -120,7 +120,8 @@ module.exports = {
         '!patear', '!celebrar', '!aburrido', '!risa', '!smug', '!stare'
     ],
     category: 'Social',
-    async execute(sock, chatId, msg, args, { start, sender }) {
+    async execute(sock, chatId, msg, args, { start, sender, FFMPEG_PATH: envFfmpeg }) {
+        const ffmpegBin = envFfmpeg || FFMPEG_PATH;
         const config = { ...reccionesGif[start] };
         const gifukaiReaction = GIFUKAI_REACTIONS[start];
         const otakuReaction = OTAKU_REACTIONS[start];
@@ -189,11 +190,11 @@ module.exports = {
                 fs.writeFileSync(tmpIn, gifBuffer);
                 const ffmpegArgs = [
                     '-i', tmpIn, '-movflags', 'faststart', '-pix_fmt', 'yuv420p',
-                    '-vf', 'scale=384:-2', '-c:v', 'libx264', '-crf', '32',
-                    '-preset', 'ultrafast', '-tune', 'zerolatency', '-an', '-y', tmpOut
+                    '-vf', 'scale=320:-2', '-c:v', 'libx264', '-crf', '33',
+                    '-preset', 'ultrafast', '-tune', 'zerolatency', '-threads', '1', '-an', '-y', tmpOut
                 ];
 
-                await execFileAsync(FFMPEG_PATH, ffmpegArgs, { timeout: 25000, windowsHide: true });
+                await execFileAsync(ffmpegBin, ffmpegArgs, { timeout: 25000, windowsHide: true });
                 const mp4Buffer = fs.readFileSync(tmpOut);
 
                 await sock.sendMessage(chatId, {
