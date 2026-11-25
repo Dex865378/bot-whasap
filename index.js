@@ -67,7 +67,15 @@ const UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker']);
 // --- RATE LIMIT DE STICKERS (anti-ban) ---
 const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 60000, 1000);
 const STICKER_GROUP_PER_MIN = envInt('STICKER_GROUP_PER_MIN', 15, 1);
+const STICKER_GLOBAL_COOLDOWN_MS = envInt('STICKER_GLOBAL_COOLDOWN_MS', 4000, 1000);
 const stickerGroupBudget = new Map();
+
+// Delay gaussiano: simula varianza humana (no uniforme)
+function gaussianDelay(mean, stddev) {
+    const u1 = Math.random(), u2 = Math.random();
+    const z = Math.sqrt(-2 * Math.log(u1 || 0.001)) * Math.cos(2 * Math.PI * u2);
+    return Math.max(800, Math.round(mean + z * stddev));
+}
 const PUBLIC_RENDER_URL = process.env.RENDER_EXTERNAL_URL
     || (process.env.RENDER_SERVICE_NAME ? `https://${process.env.RENDER_SERVICE_NAME}.onrender.com` : '');
 const PAIRING_CODE_TTL_MS = envInt('PAIRING_CODE_TTL_MS', 180000, 60000);
@@ -242,7 +250,7 @@ const MAX_COLA_SALIDA = envInt('MAX_COLA_SALIDA', 200, 50); // Cola amplia para 
 // Pausa base entre mensajes del mismo chat. 120ms (~8 msgs/s máx) evita
 // ráfagas de spam que provocan bans/403 de WhatsApp y es 2x más ágil que 250ms.
 // Override sin redeploy: PERF_QUEUE_MIN_MS.
-const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 1100, 200);
+const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 2000, 500);
 
 const SEND_MESSAGE_TIMEOUT_MS = envInt('SEND_MESSAGE_TIMEOUT_MS', 25000, 5000);
 
@@ -289,6 +297,16 @@ async function procesarColaSalida(sock, chatId) {
 
     while (estado.cola.length > 0) {
         const { content, options, resolve, reject } = estado.cola.shift();
+        // Simular "escribiendo..." para mensajes de texto (anti-ban crítico)
+        if (content?.text && !content._relay && !content.react) {
+            try {
+                await sock.sendPresenceUpdate('composing', chatId);
+                const typingMs = Math.min(Math.max(content.text.length * 40, 1500), 6000);
+                const jitter = Math.floor(Math.random() * 800);
+                await new Promise(r => setTimeout(r, typingMs + jitter));
+                await sock.sendPresenceUpdate('paused', chatId);
+            } catch (_) {}
+        }
         try {
             let result;
             if (content && content._relay) {
@@ -327,11 +345,10 @@ async function procesarColaSalida(sock, chatId) {
                 reject(e);
             }
         }
-        // Pausa entre mensajes: ritmo humano con jitter aleatorio.
-        // Sin modo turbo: WhatsApp banea cuentas que envían >1 msg/s sostenido.
-        const baseDelay = esChatLento(chatId) ? Math.max(QUEUE_MIN_DELAY_MS * 2, 2500) : QUEUE_MIN_DELAY_MS;
-        const jitter = Math.floor(Math.random() * 450);
-        const delayMs = baseDelay + jitter;
+        // Pausa entre mensajes: delay gaussiano para parecer humano.
+        // Distribución centrada en QUEUE_MIN_DELAY_MS con stddev de 800ms.
+        const baseDelay = esChatLento(chatId) ? Math.max(QUEUE_MIN_DELAY_MS * 2, 4000) : QUEUE_MIN_DELAY_MS;
+        const delayMs = gaussianDelay(baseDelay, 800);
         if (estado.cola.length > 0) await new Promise(r => setTimeout(r, delayMs));
     }
 
@@ -1528,6 +1545,11 @@ async function startBot() {
 
             const tipo = getContentType(msg.message);
 
+            // Read receipt: marcar mensaje como leído antes de procesarlo (anti-ban)
+            if (msg.key?.id && chatId) {
+                sock.readMessages([msg.key]).catch(() => {});
+            }
+
             let texto = '';
             if (tipo === 'conversation') texto = msg.message.conversation || '';
             else if (tipo === 'extendedTextMessage') texto = msg.message.extendedTextMessage?.text || '';
@@ -1989,8 +2011,11 @@ async function procesarMensaje(sock, msg) {
                 }
             }
 
-            // --- RATE LIMIT DE STICKERS (anti-ban): 1 cada 5s por usuario, máx N/min por grupo ---
+            // --- RATE LIMIT DE STICKERS (anti-ban): 1 cada 60s por usuario, cooldown global, máx N/min por grupo ---
             if (esStickerIlimitado && !isGlobalAdmin) {
+                // Cooldown global: mínimo N segundos entre CUALQUIER sticker del bot
+                const globalStickerWait = verificarCooldown('BOT', '!s-global', STICKER_GLOBAL_COOLDOWN_MS);
+                if (globalStickerWait > 0) return;
                 const stickerWait = verificarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);
                 if (stickerWait > 0) return;
                 if (isGroup) {

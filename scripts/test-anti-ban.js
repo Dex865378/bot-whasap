@@ -184,24 +184,48 @@ const assert = require('assert');
     });
 
     // ── Verificar constantes ──
-    await probar('QUEUE_MIN_DELAY_MS >= 1100 (sin env override)', async () => {
-        // Leer el valor por defecto del source
+    await probar('QUEUE_MIN_DELAY_MS >= 2000 (sin env override)', async () => {
         const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
         const match = src.match(/QUEUE_MIN_DELAY_MS\s*=\s*envInt\s*\(\s*['"]PERF_QUEUE_MIN_MS['"]\s*,\s*(\d+)/);
         assert.ok(match, 'debe encontrar la declaración de QUEUE_MIN_DELAY_MS');
         const defaultVal = parseInt(match[1], 10);
-        assert.ok(defaultVal >= 1100, `default ${defaultVal} debe ser >= 1100`);
+        assert.ok(defaultVal >= 2000, `default ${defaultVal} debe ser >= 2000`);
     });
 
     await probar('no existe modo turbo (10ms/20ms/35ms) en procesarColaSalida', async () => {
         const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
-        // Buscar que no haya delays de <100ms hardcodeados en la función de cola
         const fnStart = src.indexOf('async function procesarColaSalida');
         const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
-        const fnBody = src.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 3000);
+        const fnBody = src.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 4000);
         assert.ok(!fnBody.includes('delayMs = 10') && !fnBody.includes('delayMs = 20') && !fnBody.includes('delayMs = 35'),
             'no debe haber delays turbo de 10/20/35ms');
         assert.ok(!fnBody.includes('cola.length > 25'), 'no debe haber escalón turbo por tamaño de cola');
+    });
+
+    await probar('procesarColaSalida simula composing antes de texto', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        const fnStart = src.indexOf('async function procesarColaSalida');
+        const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
+        const fnBody = src.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 4000);
+        assert.ok(fnBody.includes("sendPresenceUpdate('composing'"), 'debe simular typing antes de enviar');
+        assert.ok(fnBody.includes("sendPresenceUpdate('paused'"), 'debe pausar typing después');
+    });
+
+    await probar('gaussianDelay existe y se usa en cola', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        assert.ok(src.includes('function gaussianDelay'), 'función gaussianDelay debe existir');
+        assert.ok(src.includes('gaussianDelay(baseDelay'), 'debe usarse en la cola de salida');
+    });
+
+    await probar('readMessages se llama antes de procesar', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        assert.ok(src.includes('sock.readMessages([msg.key])'), 'debe marcar mensajes como leídos');
+    });
+
+    await probar('cooldown global de stickers (STICKER_GLOBAL_COOLDOWN_MS)', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        assert.ok(src.includes('STICKER_GLOBAL_COOLDOWN_MS'), 'constante debe existir');
+        assert.ok(src.includes("'!s-global'"), 'debe tener cooldown global con key !s-global');
     });
 
     // ── reacciones: check groupConf guard ──
