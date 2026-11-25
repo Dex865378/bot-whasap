@@ -169,8 +169,23 @@ async function main() {
 
     let backoffMs = 1000;
     let activos = 0;
+    let currentWs = null;
+    let shuttingDown = false;
+
+    const shutdown = (sig) => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.log(`🛑 [WORKER-PC] Apagando (${sig}), Render retomará los stickers al instante.`);
+        if (currentWs && currentWs.readyState === 1) {
+            try { currentWs.close(1000, 'worker-shutdown'); } catch (_) { }
+        }
+        setTimeout(() => process.exit(0), 250);
+    };
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
 
     async function conectar() {
+        if (shuttingDown) return;
         const renderHttp = await descubrirRenderUrl();
         if (!renderHttp) {
             console.log(`⏳ [WORKER-PC] Esperando URL de Render en Turso (reintento en ${Math.round(backoffMs / 1000)}s)...`);
@@ -188,6 +203,7 @@ async function main() {
             maxPayload: 35 * 1024 * 1024,
             handshakeTimeout: 15000
         });
+        currentWs = ws;
 
         let vivoTimer = null;
         let reconectado = false;
@@ -262,7 +278,9 @@ async function main() {
         const reconectar = (motivo) => {
             if (reconectado) return;
             reconectado = true;
+            if (currentWs === ws) currentWs = null;
             if (vivoTimer) { clearInterval(vivoTimer); vivoTimer = null; }
+            if (shuttingDown) return;
             console.log(`🔄 [WORKER-PC] Desconectado (${motivo}). Reintentando en ${Math.round(backoffMs / 1000)}s...`);
             setTimeout(conectar, backoffMs);
             backoffMs = Math.min(15000, backoffMs * 2);

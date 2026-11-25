@@ -723,6 +723,21 @@ async function getAuthKeys(ids) {
     } catch (e) { return {}; }
 }
 
+async function getAllAuthKeys(limit = 5000) {
+    if (!connected) return {};
+    try {
+        const rs = await dbClient.execute({
+            sql: "SELECT id, data FROM auth_keys WHERE id != 'creds' LIMIT ?",
+            args: [limit]
+        });
+        const result = {};
+        for (const row of rs.rows) {
+            result[row.id] = row.data;
+        }
+        return result;
+    } catch (e) { return {}; }
+}
+
 async function saveAuthKey(id, data) {
     if (!connected) return false;
     try {
@@ -737,6 +752,24 @@ async function saveAuthKey(id, data) {
 async function deleteAuthKey(id) {
     if (!connected) return false;
     try { await dbClient.execute({ sql: 'DELETE FROM auth_keys WHERE id = ?', args: [id] }); return true; } catch (e) { return false; }
+}
+
+async function saveAuthKeysBatch(entries) {
+    if (!connected || !entries || entries.length === 0) return false;
+    try {
+        const stmts = entries.map((e) => e.op === 'del'
+            ? { sql: 'DELETE FROM auth_keys WHERE id = ?', args: [e.key] }
+            : {
+                sql: 'INSERT INTO auth_keys (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = ?, updated_at = CURRENT_TIMESTAMP',
+                args: [e.key, e.val, e.val]
+            }
+        );
+        await ejecutarEnLotes(stmts, 80);
+        return true;
+    } catch (e) {
+        console.error('❌ [DB] Error saveAuthKeysBatch:', e.message);
+        return false;
+    }
 }
 
 async function guardarManga(codigo, titulo, carpeta, descripcion = '', generos = '') {
@@ -1600,7 +1633,7 @@ async function obtenerFlashStatus(chatId) {
 
 module.exports = {
     init, isConnected: () => connected, nukeSession,
-    getAuthKey, getAuthKeys, saveAuthKey, deleteAuthKey,
+    getAuthKey, getAuthKeys, getAllAuthKeys, saveAuthKey, deleteAuthKey, saveAuthKeysBatch,
     guardarManga, obtenerMangas, buscarMangas,
     estaGrupoActivo, activarGrupo, desactivarGrupo,
     tieneBienvenida, activarBienvenida, desactivarBienvenida, setMensajeBienvenida,

@@ -85,13 +85,55 @@ const cooldowns = new Map(); // ESCUDO ANTI-SPAM
 const nombreWaSync = new Map(); // sender -> timestamp del último chequeo
 const NOMBRE_WA_TTL_MS = 10 * 60 * 1000;
 
+let tursoAuthFlush = null;
+let mensajesEnVuelo = 0;
+const groupMetaCache = new LRUCache(100, 5 * 60 * 1000);
+const inflightGroupMeta = new Map();
+
+function normalizarAdminsMeta(participants) {
+    return (participants || [])
+        .filter(p => p && p.admin)
+        .map(p => (p.id || p.jid || '').split('@')[0].replace(/\D/g, ''))
+        .filter(Boolean);
+}
+
+async function obtenerGroupMetadataCached(sock, chatId) {
+    if (!sock || !chatId || !chatId.endsWith('@g.us')) return null;
+    const cached = groupMetaCache.get(chatId);
+    if (cached) return cached;
+    if (inflightGroupMeta.has(chatId)) return inflightGroupMeta.get(chatId);
+
+    const p = (async () => {
+        try {
+            const metadata = await Promise.race([
+                sock.groupMetadata(chatId),
+                new Promise((_, rej) => setTimeout(() => rej(new Error('group-meta-timeout')), 5000))
+            ]);
+            if (metadata && Array.isArray(metadata.participants)) {
+                groupMetaCache.set(chatId, metadata);
+                if (typeof botState !== 'undefined' && botState.adminCache) {
+                    botState.adminCache.set(chatId, { admins: normalizarAdminsMeta(metadata.participants), time: Date.now() });
+                }
+            }
+            return metadata || null;
+        } catch (_) {
+            return null;
+        } finally {
+            inflightGroupMeta.delete(chatId);
+        }
+    })();
+    inflightGroupMeta.set(chatId, p);
+    return p;
+}
+
 function limpiarCachesMemoria(ttlCooldownMs = 5 * 60 * 1000) {
     if (typeof botState === 'undefined') return 0;
     const cachesLRU = [
         ['cacheTrad', botState.cacheTrad],
         ['mangaInfo', botState.mangaInfo], ['silenciados', botState.silenciados],
         ['bounties', botState.bounties], ['escudos', botState.escudos],
-        ['groupCache', botState.groupCache], ['adminCache', botState.adminCache]
+        ['groupCache', botState.groupCache], ['adminCache', botState.adminCache],
+        ['groupMetaCache', groupMetaCache]
     ];
     let totalLimpiado = 0;
     for (const [, cache] of cachesLRU) {
@@ -185,7 +227,7 @@ const MAX_COLA_SALIDA = envInt('MAX_COLA_SALIDA', 200, 50); // Cola amplia para 
 // de 4 mensajes (!leer, !perfil) tardara 1s solo en esperas. Ahora la base es
 // baja y el ritmo conservador se activa SOLO si el chat ya falló (esChatLento
 // se marca ante timeout/429). Override sin redeploy: PERF_QUEUE_MIN_MS.
-const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 80, 0);
+const QUEUE_MIN_DELAY_MS = envInt('PERF_QUEUE_MIN_MS', 40, 0);
 
 const SEND_MESSAGE_TIMEOUT_MS = envInt('SEND_MESSAGE_TIMEOUT_MS', 25000, 5000);
 
@@ -257,11 +299,11 @@ async function procesarColaSalida(sock, chatId) {
         // Pausa entre mensajes: turbo si la cola está cargada, conservadora
         // (250ms) si este chat viene de un timeout/429, normal el resto.
         let delayMs;
-        if (estado.cola.length > 25) delayMs = 15;      // Ráfaga masiva
-        else if (estado.cola.length > 10) delayMs = 25; // Modo turbo: cola cargada
-        else if (estado.cola.length > 5) delayMs = 50;  // Normal
+        if (estado.cola.length > 25) delayMs = 10;      // Ráfaga masiva
+        else if (estado.cola.length > 10) delayMs = 20; // Modo turbo: cola cargada
+        else if (estado.cola.length > 5) delayMs = 35;  // Normal
         else if (esChatLento(chatId)) delayMs = 250;    // Protección flood
-        else delayMs = QUEUE_MIN_DELAY_MS;              // Base (80ms por defecto)
+        else delayMs = QUEUE_MIN_DELAY_MS;              // Base (40ms por defecto)
         if (estado.cola.length > 0) await new Promise(r => setTimeout(r, delayMs));
     }
 
@@ -839,6 +881,8 @@ function dashboardHandler(req, res) {
             },
             latencia: resumenLatencias(),
             stickersPool: { ...stickerPool.getStats(), cacheCleanups: _stickerCleanups },
+            inFlightMsgs: mensajesEnVuelo,
+            groupMetaCached: groupMetaCache.size,
             queues
         });
         return;
@@ -983,11 +1027,13 @@ async function startBot() {
         console.log('🔐 Auth: Turso Cloud');
         authState = tursoAuth.state;
         saveCreds = tursoAuth.saveCreds;
+        tursoAuthFlush = tursoAuth.flush || null;
     } else {
         console.log('📁 Auth: Local (.bot_session)');
         const local = await useMultiFileAuthState(AUTH_DIR);
         authState = local.state;
         saveCreds = local.saveCreds;
+        tursoAuthFlush = null;
     }
 
     // Latido de instancia: permite detectar dos procesos peleando la misma
@@ -1047,7 +1093,11 @@ async function startBot() {
         markOnlineOnConnect: false,
         syncFullHistory: false,
         generateHighQualityLinkPreview: false, // Ahorra CPU y RAM
-        getMessage: async () => undefined // No retener mensajes viejos en RAM
+        getMessage: async () => undefined, // No retener mensajes viejos en RAM
+        cachedGroupMetadata: async (jid) => {
+            if (!activeSock || !jid || !jid.endsWith('@g.us')) return undefined;
+            return (await obtenerGroupMetadataCached(activeSock, jid)) || undefined;
+        }
     });
     activeSock = sock;
 
@@ -1204,9 +1254,14 @@ async function startBot() {
                     })().catch(() => { });
                 });
             }
-            // Heartbeat: Guardar credenciales cada 10 minutos para asegurar persistencia
+            // Heartbeat: Guardar credenciales y claves Signal pendientes cada 10 minutos
             onceInterval('heartbeat', async () => {
-                if (botState.isConnected && saveCreds) {
+                if (botState.isConnected && tursoAuthFlush) {
+                    try {
+                        await tursoAuthFlush();
+                        console.log('💓 Heartbeat: Sesión sincronizada con Turso.');
+                    } catch (e) { }
+                } else if (botState.isConnected && saveCreds) {
                     try {
                         await saveCreds();
                         console.log('💓 Heartbeat: Sesión sincronizada con Turso.');
@@ -1282,12 +1337,15 @@ async function startBot() {
 
     // Semáforo de mensajes en vuelo (ver PROCESAMIENTO CONCURRENTE más abajo).
     const MAX_MSG_CONCURRENT = envInt('PERF_MAX_MSG_CONCURRENT', 32, 8);
-    let mensajesEnVuelo = 0;
+    const MAX_MSG_QUEUE = envInt('PERF_MAX_MSG_QUEUE', 150, 32);
     const esperaSlotMensaje = [];
     function adquirirSlotMensaje() {
         if (mensajesEnVuelo < MAX_MSG_CONCURRENT) {
             mensajesEnVuelo++;
             return Promise.resolve(true);
+        }
+        if (esperaSlotMensaje.length >= MAX_MSG_QUEUE) {
+            return Promise.resolve(false);
         }
         return new Promise(resolve => esperaSlotMensaje.push(resolve));
     }
@@ -1366,10 +1424,11 @@ async function startBot() {
             if (remoteJidStub?.endsWith('@g.us') && [27, 31, 71].includes(msg.messageStubType)) {
                 const partes = (msg.messageStubParameters || []).map(normWelcomeJid).filter(Boolean);
                 if (partes.length > 0) {
+                    groupMetaCache.delete(remoteJidStub);
+                    botState.adminCache.delete(remoteJidStub);
                     console.log(`👥 [STUB] Entrada de ${partes.length} usuario(s) a ${remoteJidStub}`);
-                    for (const p of partes) {
-                        if (!yaSaludado(remoteJidStub, p)) await enviarBienvenida(sock, remoteJidStub, p);
-                    }
+                    const pendientes = partes.filter(p => !yaSaludado(remoteJidStub, p));
+                    if (pendientes.length) Promise.allSettled(pendientes.map(p => enviarBienvenida(sock, remoteJidStub, p))).catch(() => {});
                 }
                 if (!msg.message) continue;
             }
@@ -1378,10 +1437,11 @@ async function startBot() {
             if (remoteJidStub?.endsWith('@g.us') && [28, 32].includes(msg.messageStubType)) {
                 const partes = (msg.messageStubParameters || []).map(normWelcomeJid).filter(Boolean);
                 if (partes.length > 0) {
+                    groupMetaCache.delete(remoteJidStub);
+                    botState.adminCache.delete(remoteJidStub);
                     console.log(`👋 [STUB] Salida de ${partes.length} usuario(s) de ${remoteJidStub}`);
-                    for (const p of partes) {
-                        if (!yaDespedido(remoteJidStub, p)) await enviarDespedida(sock, remoteJidStub, p);
-                    }
+                    const salientes = partes.filter(p => !yaDespedido(remoteJidStub, p));
+                    if (salientes.length) Promise.allSettled(salientes.map(p => enviarDespedida(sock, remoteJidStub, p))).catch(() => {});
                 }
                 if (!msg.message) continue;
             }
@@ -1394,10 +1454,9 @@ async function startBot() {
                 if (groupNotif) {
                     const participants = groupNotif.participants || [];
                     const groupId = msg.key.remoteJid;
+                    groupMetaCache.delete(groupId);
                     console.log(`👥 [SISTEMA] Detectada entrada de ${participants.length} usuario(s) a ${groupId}`);
-                    
-                    // Procesar bienvenidas en paralelo (antes una por una)
-                    await Promise.allSettled(participants.map(p => enviarBienvenida(sock, groupId, p)));
+                    Promise.allSettled(participants.map(p => enviarBienvenida(sock, groupId, p))).catch(() => {});
                     continue; // No procesar como mensaje normal
                 }
             }
@@ -1485,7 +1544,10 @@ async function startBot() {
             // adquirirSlotMensaje() para no frenar !ping/!menu/juegos bajo ráfagas.
             const esStickerCmd = /^!(s|sticker)(\s|$)/i.test(texto.trim());
             (async () => {
-                if (!esStickerCmd) await adquirirSlotMensaje();
+                if (!esStickerCmd) {
+                    const okSlot = await adquirirSlotMensaje();
+                    if (!okSlot) return;
+                }
                 try {
                     await procesarMensaje(sock, msg);
                     botState.msgCount++;
@@ -1501,16 +1563,28 @@ async function startBot() {
     // --- BIENVENIDAS (evento de participantes; funciona sin ser admin,
     // pero WhatsApp no siempre lo entrega: el stub en upsert es el respaldo) ---
     sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
+        if (id) {
+            groupMetaCache.delete(id);
+            botState.adminCache.delete(id);
+        }
         console.log(`👥 [ADMIN] Evento grupo: ${action} en ${id} para ${participants.length} usuarios`);
         if (action === 'add') {
             const pendientes = participants.map(normWelcomeJid).filter(p => p && !yaSaludado(id, p));
-            // En paralelo y sin pausas de 2s: cada bienvenida ya es rápida
             await Promise.allSettled(pendientes.map(p => enviarBienvenida(sock, id, p)));
             return;
         }
         if (action === 'remove' || action === 'leave') {
             const salientes = participants.map(normWelcomeJid).filter(p => p && !yaDespedido(id, p));
             await Promise.allSettled(salientes.map(p => enviarDespedida(sock, id, p)));
+        }
+    });
+
+    sock.ev.on('groups.update', (updates) => {
+        for (const u of updates || []) {
+            if (u?.id) {
+                groupMetaCache.delete(u.id);
+                botState.adminCache.delete(u.id);
+            }
         }
     });
 
@@ -1722,13 +1796,6 @@ async function procesarMensaje(sock, msg) {
         let isAdmin = isGlobalAdmin;
 
         if (isCommand && isGroup && !isAdmin) {
-            const adminsDe = (parts) => (parts || [])
-                .filter(p => p && p.admin)
-                // Normalizar a solo dígitos: sender puede llegar como @lid y la
-                // metadata traer @s.whatsapp.net (o al revés); el JID completo
-                // nunca coincidía y solo el dueño pasaba el filtro.
-                .map(p => cleanNumber(p.id || p.jid || ''))
-                .filter(Boolean);
             const esAdminEn = (lista) =>
                 lista.includes(senderClean) || lista.includes(sender) ||
                 lista.some(a => senderClean.includes(a) || a.includes(senderClean));
@@ -1742,27 +1809,19 @@ async function procesarMensaje(sock, msg) {
             // caché vencido: así el primer comando del nuevo admin ya funciona.
             if (!lista || !esAdminEn(lista)) {
                 const lastFetch = adminFetchAt.get(chatId) || 0;
-                if (ahora - lastFetch >= ADMIN_FETCH_MIN_MS) {
+                const cachedMeta = groupMetaCache.get(chatId);
+                if (cachedMeta?.participants) {
+                    lista = normalizarAdminsMeta(cachedMeta.participants);
+                    botState.adminCache.set(chatId, { admins: lista, time: Date.now() });
+                } else if (ahora - lastFetch >= ADMIN_FETCH_MIN_MS) {
                     adminFetchAt.set(chatId, ahora);
-                    try {
-                        if (!globalThis.__inflightAdminMeta) globalThis.__inflightAdminMeta = new Map();
-                        let pMeta = globalThis.__inflightAdminMeta.get(chatId);
-                        if (!pMeta) {
-                            pMeta = Promise.race([
-                                sock.groupMetadata(chatId),
-                                new Promise((_, rej) => setTimeout(() => rej(new Error('admin-timeout')), 5000))
-                            ]).finally(() => globalThis.__inflightAdminMeta.delete(chatId));
-                            globalThis.__inflightAdminMeta.set(chatId, pMeta);
-                        }
-                        const metadata = await pMeta;
-                        lista = adminsDe(metadata.participants);
-                        botState.adminCache.set(chatId, { admins: lista, time: Date.now() });
-                    } catch (e) { /* timeout/red: se usa el caché viejo abajo */ }
+                    const metadata = await obtenerGroupMetadataCached(sock, chatId);
+                    if (metadata?.participants) {
+                        lista = normalizarAdminsMeta(metadata.participants);
+                    }
                 } else if (!lista) {
                     // Throttle activo y sin caché: refresco en segundo plano
-                    sock.groupMetadata(chatId).then(metadata => {
-                        botState.adminCache.set(chatId, { admins: adminsDe(metadata.participants), time: Date.now() });
-                    }).catch(() => { });
+                    obtenerGroupMetadataCached(sock, chatId).catch(() => { });
                 }
             }
 
@@ -2056,8 +2115,12 @@ async function procesarMensaje(sock, msg) {
                     case '!rechazar_lucha': emoji = '❌'; break;
                 }
 
-                // Efecto de Grimorio (Solo si es un comando que suele usar economía)
-                if (!esChatLento(chatId) && ['!menu', '!tienda', '!minar', '!perfil', '!p'].includes(start)) {
+                // Omitir reacciones cosméticas bajo ráfaga para no duplicar envíos Signal al grupo
+                const colaChatSize = colaSalida.get(chatId)?.cola?.length || 0;
+                const enviarReaccionCosmetica = !esChatLento(chatId) && mensajesEnVuelo <= 3 && colaChatSize < 2 && stickerPool.queue.length < 2;
+
+                // Efecto de Grimorio (Solo si no hay ráfaga y es un comando que suele usar economía)
+                if (enviarReaccionCosmetica && ['!menu', '!tienda', '!minar', '!perfil', '!p'].includes(start)) {
                     db.obtenerUsuario(sender).then(u => {
                         if (u && u.inventario) {
                             try {
@@ -2068,7 +2131,7 @@ async function procesarMensaje(sock, msg) {
                     }).catch(() => { });
                 }
 
-                if (!esChatLento(chatId)) {
+                if (enviarReaccionCosmetica) {
                     sock.sendMessage(chatId, { react: { text: emoji, key: msg.key } }).catch(() => { });
                 }
 
@@ -2171,6 +2234,7 @@ async function apagar(motivo) {
     // Tope de seguridad: si Turso no responde, el proceso igual termina
     // (antes un flush colgado dejaba el deploy viejo "vivo" hasta el SIGKILL).
     const tope = new Promise(r => setTimeout(r, 8000));
+    try { if (tursoAuthFlush) await Promise.race([tursoAuthFlush(), tope]); } catch (e) { }
     try { await Promise.race([flushStatsBatch(), tope]); } catch (e) { console.error('❌ [Shutdown] flush stats:', e.message); }
     try { if (db.flushPendingUpdates) await Promise.race([db.flushPendingUpdates(), tope]); } catch (e) { }
     process.exit(0);

@@ -690,6 +690,69 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.ok(heavyMatch && !heavyMatch[1].includes("'!s'") && !heavyMatch[1].includes("'!sticker'"), '!s y !sticker fuera de heavyCmds');
         assert.ok(idxSrc.includes('!esStickerIlimitado'), 'debe eximir !s/!sticker en antiSpam / dupCmd / cooldown global');
         assert.ok(idxSrc.includes('!esStickerCmd'), '!s debe usar carril independiente de adquirirSlotMensaje');
+        assert.ok(idxSrc.includes('cachedGroupMetadata:'), 'makeWASocket debe usar cachedGroupMetadata para evitar query por mensaje');
+        assert.ok(idxSrc.includes('tursoAuthFlush'), 'apagar() debe hacer flush de claves Signal en Turso');
+    });
+
+    await probar('turso-auth precarga claves Signal en RAM, coalesce escrituras y hace flush batch', async () => {
+        const dbMod = require('../database');
+        const orig = {
+            isConnected: dbMod.isConnected,
+            getAuthKey: dbMod.getAuthKey,
+            getAuthKeys: dbMod.getAuthKeys,
+            getAllAuthKeys: dbMod.getAllAuthKeys,
+            saveAuthKey: dbMod.saveAuthKey,
+            deleteAuthKey: dbMod.deleteAuthKey,
+            saveAuthKeysBatch: dbMod.saveAuthKeysBatch
+        };
+        try {
+            const store = new Map([
+                ['creds', JSON.stringify({ me: { id: '1@s.whatsapp.net' } })],
+                ['sender-key-memory-g1@g.us', JSON.stringify({ u1: true })]
+            ]);
+            let getCalls = 0, batchCalls = 0, batchOpsCount = 0;
+            dbMod.isConnected = () => true;
+            dbMod.getAuthKey = async (id) => store.get(id) || null;
+            dbMod.getAllAuthKeys = async () => ({ 'sender-key-memory-g1@g.us': store.get('sender-key-memory-g1@g.us') });
+            dbMod.getAuthKeys = async (ids) => { getCalls++; const out = {}; for (const id of ids) if (store.has(id)) out[id] = store.get(id); return out; };
+            dbMod.saveAuthKey = async (id, val) => { store.set(id, val); return true; };
+            dbMod.deleteAuthKey = async (id) => { store.delete(id); return true; };
+            dbMod.saveAuthKeysBatch = async (entries) => {
+                batchCalls++;
+                batchOpsCount += entries.length;
+                for (const e of entries) {
+                    if (e.op === 'del') store.delete(e.key);
+                    else store.set(e.key, e.val);
+                }
+                return true;
+            };
+
+            const { useTursoAuthState } = require('../turso-auth');
+            const auth = await useTursoAuthState();
+
+            // 1. Clave precargada no toca getAuthKeys
+            const r1 = await auth.state.keys.get('sender-key-memory', ['g1@g.us']);
+            assert.deepStrictEqual(r1['g1@g.us'], { u1: true });
+            assert.strictEqual(getCalls, 0, 'clave precargada debe servirse desde RAM');
+
+            // 2. Miss negativo cacheado no repite queries a Turso
+            await auth.state.keys.get('session', ['inexistente_0']);
+            await auth.state.keys.get('session', ['inexistente_0']);
+            assert.strictEqual(getCalls, 1, 'miss repetido debe resolverse desde caché negativa');
+
+            // 3. Multiples mutaciones sobre misma clave se colapsan en 1 op en batch
+            for (let i = 0; i < 10; i++) {
+                await auth.state.keys.set({ 'sender-key-memory': { 'g1@g.us': { u1: true, step: i } } });
+            }
+            const rAfter = await auth.state.keys.get('sender-key-memory', ['g1@g.us']);
+            assert.strictEqual(rAfter['g1@g.us'].step, 9, 'lectura inmediata tras set devuelve último valor');
+            await auth.flush();
+            assert.strictEqual(batchCalls, 1, 'flush debe agrupar todas las escrituras en 1 batch HTTP');
+            assert.strictEqual(batchOpsCount, 1, '10 cambios de misma clave deben colapsarse a 1 operación');
+            assert.strictEqual(JSON.parse(store.get('sender-key-memory-g1@g.us')).step, 9);
+        } finally {
+            Object.assign(dbMod, orig);
+        }
     });
 
     if (TIENE_FFMPEG) {
