@@ -175,7 +175,7 @@ function sockFalso({ fallaUpload = false } = {}) {
         });
         assert.strictEqual(estado.relay, 1, 'debe mandar por relayMessage');
         assert.strictEqual(estado.enviados.length, 0, 'no debe mandar además el sticker normal');
-        assert.strictEqual(maxAudio, 6, 'el audio del video se corta a 6s como el sticker');
+        assert.strictEqual(maxAudio, 15, 'el audio del video permite hasta 15s como el sticker');
         const audio = leerAudioDelMensaje(estado.capturado);
         assert.ok(audio, 'el mensaje debe llevar el campo 26');
     });
@@ -277,6 +277,15 @@ function sockFalso({ fallaUpload = false } = {}) {
             assert.ok(audio, 'el mensaje lleva el campo 26');
             assert.ok(Number(audio.seconds) >= 1, 'seconds >= 1, fue ' + audio.seconds);
             assert.ok(audio.waveform && audio.waveform.length === 64, 'waveform embebido de 64 bytes');
+
+            // Verificar que audios de hasta 15s (ej. 13s) no se truncan a 6s/10s
+            execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '13', '-c:a', 'libopus', '-b:a', '24k', '-f', 'ogg', '-y', video], { stdio: 'pipe' });
+            const info13 = await prepararAudioParaSticker(fs.readFileSync(video), FFMPEG, 15);
+            assert.ok(info13 && info13.segundos >= 12 && info13.segundos <= 15.5, 'audio 13s debe conservar >=12s (fue ' + (info13 && info13.segundos) + ')');
+            const { sock: sock13, estado: est13 } = sockFalso();
+            await enviarStickerConSonido(sock13, '123@s.whatsapp.net', fs.readFileSync(STICKER), info13, null, FFMPEG);
+            const audio13 = leerAudioDelMensaje(est13.capturado);
+            assert.ok(audio13 && Number(audio13.seconds) >= 12, 'subirYArmarSticker debe preservar seconds >= 12 (fue ' + (audio13 && audio13.seconds) + ')');
         } finally {
             try { fs.unlinkSync(video); } catch (e) {}
             try { fs.rmdirSync(dir); } catch (e) {}
@@ -694,11 +703,13 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.ok(idxSrc.includes('tursoAuthFlush'), 'apagar() debe hacer flush de claves Signal en Turso');
     });
 
-    await probar('avisa cuantos segundos faltan cuando pegan el cooldown de sticker (60 s)', () => {
+    await probar('avisa cuantos segundos faltan con el mensaje exacto cuando pegan el cooldown (45 s)', () => {
         const idxSrc = fs.readFileSync(path.join(RAIZ, 'index.js'), 'utf8');
+        assert.ok(/STICKER_USER_COOLDOWN_MS\s*=\s*envInt\(\s*['"]STICKER_USER_COOLDOWN_MS['"]\s*,\s*45000/.test(idxSrc), 'cooldown por defecto debe ser 45000 ms (45 s)');
         assert.ok(!/if \(stickerWait > 0\) return;/.test(idxSrc), 'no debe salir en silencio al pegar el cooldown');
         assert.ok(idxSrc.includes("'!s-wait-notice'"), 'el aviso lleva su propio cooldown para no spamear');
-        assert.ok(/Espera \$\{stickerWait\} s/.test(idxSrc), 'el aviso debe decir cuantos segundos faltan');
+        assert.ok(idxSrc.includes('faltan ${stickerWait} segundos para volver a usar el comando !s para hacer esticker con audio'),
+            'el aviso debe usar exactamente: faltan ${stickerWait} segundos para volver a usar el comando !s para hacer esticker con audio');
     });
 
     await probar('turso-auth precarga claves Signal en RAM, coalesce escrituras y hace flush batch', async () => {
@@ -806,15 +817,28 @@ function sockFalso({ fallaUpload = false } = {}) {
             assert.ok(out && out.length > 20, 'debe producir un webp valido');
         });
 
-        await probar('convertirAWebpBuffer convierte video real a WebP animado (FFmpeg 5.x/9.x)', async () => {
+        await probar('convertirAWebpBuffer convierte video real de 14s a WebP animado (~15 fps, <= 920 KB)', async () => {
             const { esWebpAnimado } = require('../utils/media');
+            const { STICKER_MAX_SEGUNDOS, STICKER_VIDEO_FPS, MAX_STICKER_WEBP_BYTES } = require('../utils/stickerProcessor');
+            assert.strictEqual(STICKER_MAX_SEGUNDOS, 15, 'tope animado debe ser 15 segundos');
+            assert.ok(STICKER_VIDEO_FPS >= 15, 'FPS debe ser >= 15');
             const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-vid-test-'));
             const vidPath = path.join(dir, 'clip.mp4');
             try {
-                execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=12', '-t', '1', '-c:v', 'mpeg4', '-y', vidPath], { windowsHide: true });
+                execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=240x240:rate=30', '-t', '14', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-y', vidPath], { windowsHide: true });
                 const out = await convertirAWebpBuffer(fs.readFileSync(vidPath), true, { ffmpegPath: FFMPEG, videoThreads: 2 });
                 assert.ok(out && out.length > 100, 'debe producir WebP animado valido');
                 assert.strictEqual(esWebpAnimado(out), true, 'el WebP de video debe conservar animacion');
+                assert.ok(out.length <= MAX_STICKER_WEBP_BYTES, `WebP animado 14s no debe exceder tope WhatsApp (${out.length} > ${MAX_STICKER_WEBP_BYTES})`);
+                // Verificar duración real (> 11s demuestra que ya no corta a 6s/10s) y frames > 10fps
+                const { Image } = require('node-webpmux');
+                const webpImg = new Image();
+                await webpImg.load(out);
+                const frames = webpImg.frames || [];
+                const durMs = frames.reduce((s, f) => s + (Number(f.delay) || 0), 0);
+                assert.ok(durMs >= 12000 && durMs <= 15500, `duración WebP debe cubrir >12s hasta 15s (fue ${durMs}ms)`);
+                const fpsReal = frames.length / (durMs / 1000);
+                assert.ok(fpsReal >= 12, `FPS real debe ser fluido (>=12, fue ${fpsReal.toFixed(1)})`);
                 // Re-convertir ese mismo WebP animado no debe fallar como "formato raro"
                 const reOut = await convertirAWebpBuffer(out, false, { ffmpegPath: FFMPEG });
                 assert.ok(reOut && reOut.length > 100 && esWebpAnimado(reOut), 'WebP animado reenviado debe conservarse valido');

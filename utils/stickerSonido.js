@@ -236,9 +236,9 @@ async function esperarArchivoCifrado(filePath, expectedSha256B64, maxEsperaMs = 
     }
 }
 
-async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 10) {
+async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 15) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-    const tope = Math.max(1, Math.min(10, Number.isFinite(Number(maxSegundos)) ? Number(maxSegundos) : 10));
+    const tope = Math.max(1, Math.min(15, Number.isFinite(Number(maxSegundos)) ? Number(maxSegundos) : 15));
     const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const tmpIn = path.join(os.tmpdir(), `stk_info_in_${uid}.bin`);
     const tmpOgg = path.join(os.tmpdir(), `stk_info_out_${uid}.ogg`);
@@ -258,7 +258,7 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
             '-af', 'asetpts=PTS-STARTPTS,aresample=8000:async=1:first_pts=0',
             '-f', 's16le', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '8000',
             '-t', String(tope), '-y', tmpPcm
-        ], { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024 });
+        ], { timeout: 30000, windowsHide: true, maxBuffer: 1024 * 1024 });
 
         const [oggRead, pcm] = await Promise.all([
             fs.promises.readFile(tmpOgg),
@@ -314,7 +314,7 @@ async function subirYArmarSticker({
         mediaUploadTimeoutMs
     };
 
-    const seg = conAudio ? Math.max(1, Math.min(10, Math.round(Number(audioInfo.segundos) || 3))) : 0;
+    const seg = conAudio ? Math.max(1, Math.min(15, Math.round(Number(audioInfo.segundos) || 3))) : 0;
 
     let stickerMedia, audioMedia;
     if (conAudio && parallelUpload) {

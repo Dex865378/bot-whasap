@@ -582,11 +582,27 @@ const helpData = {
     
     // UTILIDADES
     '!menu': {
-        desc: 'Muestra el menú de comandos disponibles.',
-        usage: '!menu',
-        ejemplo: '!menu',
-        args: 'Ninguno',
+        desc: 'Muestra el menú compacto por categorías o una sección específica.',
+        usage: '!menu [categoria|todo]',
+        ejemplo: '!menu\n!menu juegos\n!menu herramientas\n!menu todo',
+        args: 'Categoría u opción "todo" (opcional)',
         cooldown: 'Ninguno'
+    },
+    '!s': {
+        desc: 'Crea un sticker de imagen, GIF o video (hasta 15 segundos, 15 fps). Videos e imágenes con audio citado conservan el sonido hasta 15s.',
+        usage: '!s (responde a imagen/video o ponlo de caption)',
+        ejemplo: '!s\n(responder a audio con imagen y caption !s)',
+        args: 'Imagen, video/GIF o documento multimedia',
+        cooldown: '45 segundos por usuario',
+        alias: '!sticker'
+    },
+    '!sticker': {
+        desc: 'Alias de !s. Crea un sticker de imagen, GIF o video (hasta 15 segundos) con soporte de sonido.',
+        usage: '!sticker',
+        ejemplo: '!sticker',
+        args: 'Imagen, video/GIF o documento multimedia',
+        cooldown: '45 segundos por usuario',
+        alias: '!s'
     },
     '!bot': {
         desc: 'Activa o desactiva el bot en el grupo.',

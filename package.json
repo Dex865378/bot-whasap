@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "worker": "node worker-pc.js",
-    "test": "node scripts/smoke-test.js",
+    "test": "node scripts/smoke-test.js && node scripts/test-menu.js",
     "test-stickers": "node scripts/test-sticker-audio.js && node scripts/test-sticker-cache.js",
     "test-sticker-cache": "node scripts/test-sticker-cache.js",
     "test-anti-ban": "node scripts/test-anti-ban.js",

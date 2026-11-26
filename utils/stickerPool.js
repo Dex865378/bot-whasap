@@ -56,7 +56,7 @@ class StickerPool {
     constructor(opts = {}) {
         this.maxLocal = Math.max(1, Number(opts.maxLocal) || 2);
         this.maxQueue = Math.max(10, Number(opts.maxQueue) || 200);
-        this.workerJobTimeoutMs = Math.max(5000, Number(opts.workerJobTimeoutMs) || 45000);
+        this.workerJobTimeoutMs = Math.max(5000, Number(opts.workerJobTimeoutMs) || 60000);
         // Mientras haya PC conectada, Render NO procesa FFmpeg pesado (esperar 0.5s
         // a la PC es ~50x más rápido que 48s en Render). Puede desactivarse si se
         // quiere modo mixto estricto pasando pcOnlyWhenConnected: false.
@@ -211,9 +211,9 @@ class StickerPool {
         if (necesitaAudio) {
             try {
                 if (audioBuffer && audioBuffer.length && fallbackAudio) {
-                    audio = await fallbackAudio(audioBuffer, 10);
+                    audio = await fallbackAudio(audioBuffer, 15);
                 } else if (esVideo && fallbackAudio) {
-                    audio = await fallbackAudio(buffer, 6);
+                    audio = await fallbackAudio(buffer, 15);
                 }
             } catch (_) { audio = null; }
         }

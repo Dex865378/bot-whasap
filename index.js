@@ -67,7 +67,7 @@ function envInt(nombre, porDefecto, minimo = 0) {
 const FAST_COMMANDS = new Set(['!ping']); // !menu excluido para respetar el filtro de manga mode
 const UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker']);
 // --- RATE LIMIT DE STICKERS (anti-ban) ---
-const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 60000, 1000);
+const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 45000, 1000);
 const STICKER_GROUP_PER_MIN = envInt('STICKER_GROUP_PER_MIN', 15, 1);
 const STICKER_GLOBAL_COOLDOWN_MS = envInt('STICKER_GLOBAL_COOLDOWN_MS', 4000, 1000);
 const stickerGroupBudget = new Map();
@@ -1157,7 +1157,7 @@ async function convertirAWebp(buffer, isVideo = false) {
 const stickerPool = new StickerPool({
     maxLocal: envInt('MAX_STICKERS_LOCAL', 1, 1),
     maxQueue: envInt('MAX_COLA_STICKERS', 200, 20),
-    workerJobTimeoutMs: envInt('WORKER_JOB_TIMEOUT_MS', 45000, 10000),
+    workerJobTimeoutMs: envInt('WORKER_JOB_TIMEOUT_MS', 60000, 10000),
     localRunner: ({ buffer, esVideo, necesitaAudio, audioBuffer }) => procesarStickerCompleto({
         buffer,
         esVideo,
@@ -2181,12 +2181,12 @@ async function procesarMensaje(sock, msg) {
                 }
             }
 
-            // --- RATE LIMIT DE STICKERS (anti-ban): 1 cada 60s por usuario, cooldown global, máx N/min por grupo ---
+            // --- RATE LIMIT DE STICKERS (anti-ban): 1 cada 45s por usuario, cooldown global, máx N/min por grupo ---
             if (esStickerIlimitado) {
                 if (isGlobalAdmin) {
                     stickerGate.adminSkip++;
                 } else {
-                    // 1) Límite de 60 s del usuario, SIEMPRE primero: si ya hizo un
+                    // 1) Límite de 45 s del usuario, SIEMPRE primero: si ya hizo un
                     //    sticker tiene que ver cuánto le falta, aunque el bot esté en
                     //    su pausa global de 4 s (antes se salía en silencio en el global
                     //    y por eso el aviso "no salía nunca" al reintentar seguido).
@@ -2196,10 +2196,8 @@ async function procesarMensaje(sock, msg) {
                         // Su propio cooldown para no spamear el grupo con avisos.
                         if (verificarCooldown(sender, '!s-wait-notice', 15000) === 0) {
                             stickerGate.notices++;
-                            const segTotal = Math.round(STICKER_USER_COOLDOWN_MS / 1000);
                             enviarConCola(sock, chatId, {
-                                text: `⏳ *Espera ${stickerWait} s* para otro sticker.\n`
-                                    + `Va 1 cada ${segTotal} s por persona, si no WhatsApp nos frena el número 😅`
+                                text: `faltan ${stickerWait} segundos para volver a usar el comando !s para hacer esticker con audio`
                             }, { quoted: msg }).catch(() => { });
                         }
                         return;

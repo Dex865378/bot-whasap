@@ -98,11 +98,11 @@ function extParaBuffer(buffer, comoVideo) {
 // --- Audio para sticker con sonido ---
 // Extrae la primera pista de audio y la normaliza a OGG/Opus mono, que es lo
 // que WhatsApp usa para las notas de voz y para el audio del sticker.
-// `maxSegundos` se limita a 10 (tope de la función). Si el video no tiene
+// `maxSegundos` se limita a 15 (tope de la función). Si el video no tiene
 // audio, ffmpeg falla y se devuelve null: el caller manda el sticker normal.
-async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 10) {
+async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 15) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-    const tope = Math.max(1, Math.min(10, Number.isFinite(Number(maxSegundos)) ? Number(maxSegundos) : 10));
+    const tope = Math.max(1, Math.min(15, Number.isFinite(Number(maxSegundos)) ? Number(maxSegundos) : 15));
     const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const tmpIn = path.join(os.tmpdir(), `stk_audio_in_${uid}.bin`);
     const tmpOut = path.join(os.tmpdir(), `stk_audio_out_${uid}.ogg`);
@@ -119,7 +119,7 @@ async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 
             '-t', String(tope),
             '-f', 'ogg', '-y', tmpOut
         ];
-        await execFileAsync(ffmpegPath, args, { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 });
+        await execFileAsync(ffmpegPath, args, { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024 });
         const salida = fs.readFileSync(tmpOut);
         return salida.length > 100 ? salida : null;
     } catch (e) {

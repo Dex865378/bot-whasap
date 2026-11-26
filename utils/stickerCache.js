@@ -13,7 +13,7 @@
 'use strict';
 const { BufferJSON } = require('@whiskeysockets/baileys');
 
-const VERSION_CACHE = 'v1';
+const VERSION_CACHE = 'v2';
 const MAX_ENTRADAS = 500;
 const mem = new Map(); // clave -> { json, ultimo }
 const stats = {

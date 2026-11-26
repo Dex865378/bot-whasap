@@ -53,6 +53,328 @@ function descargarConTimeout(downloadMediaMessage, target, timeoutMs = DOWNLOAD_
     ]).finally(() => clearTimeout(timer));
 }
 
+const MENU_SECCIONES = [
+    {
+        id: 'admin',
+        aliases: ['administracion', 'grupo', 'grupos', 'mod', 'moderacion'],
+        icono: '👑',
+        titulo: 'ADMINISTRACIÓN',
+        resumen: 'Control del grupo, bienvenida, warns y reglas',
+        items: [
+            { cmd: '!bot <on/off>', desc: 'Encender o apagar el bot en el grupo.' },
+            { cmd: '!adm <on/off>', desc: 'Solo admins pueden usar comandos.' },
+            { cmd: '!antispam <on/off>', desc: 'Activar protección anti-spam.' },
+            { cmd: '!antifarma <on/off>', desc: 'Tope 5 premios/hora. Off = grupo 100% juego.' },
+            { cmd: '!autoadmin', desc: 'El bot intenta hacerse admin solo.' },
+            { cmd: '!remoto <id-grupo> bot/adm on/off', desc: 'Control del dueño por privado (antitrampa).' },
+            { cmd: '!tag', desc: 'Mencionar a todos los miembros.' },
+            { cmd: '!kick', desc: 'Eliminar un usuario del grupo.' },
+            { cmd: '!bienvenida <on/off/ver/test>', desc: 'Configurar el mensaje de bienvenida.' },
+            { cmd: '!setbienvenida <mensaje>', desc: 'Guardar mensaje personalizado ({usuario}).' },
+            { cmd: '!despedida <on/off/ver/test>', desc: 'Mensaje cuando alguien sale del grupo.' },
+            { cmd: '!setdespedida <mensaje>', desc: 'Guardar despedida personalizada ({usuario}).' },
+            { cmd: '!setportada', desc: 'Portada de ESTE grupo (menú, bienvenida y despedida).' },
+            { cmd: '!setsticker', desc: 'Sticker de bienvenida (responde a un sticker).' },
+            { cmd: '!reglas', desc: 'Ver o configurar reglas del grupo.' },
+            { cmd: '!setreglas <texto> / !borrareglas', desc: 'Reglas propias del grupo (admin).' },
+            { cmd: '!fantasmas', desc: 'Sin hablar en los últimos 7 días.' },
+            { cmd: '!sorteo', desc: 'Elegir un miembro random del grupo.' },
+            { cmd: '!encuesta <preg> | <op1> | <op2>', desc: 'Crear encuesta de WhatsApp.' },
+            { cmd: '!warn @usuario [motivo]', desc: 'Advertir (3 = expulsión).' },
+            { cmd: '!unwarn / !warns @usuario', desc: 'Quitar o ver advertencias.' },
+            { cmd: '!afk [motivo]', desc: 'Marcarse ausente.' },
+            { cmd: '!topactivos', desc: 'Ranking de los que más hablan.' },
+            { cmd: '!recordar <tiempo> <texto>', desc: 'Aviso futuro (s/m/h/d).' }
+        ]
+    },
+    {
+        id: 'social',
+        aliases: ['perfil', 'perfiles'],
+        icono: '👤',
+        titulo: 'PERFIL Y SOCIAL',
+        resumen: 'Perfil, nivel, regalos, matrimonio y mascotas',
+        items: [
+            { cmd: '!perfil', desc: 'Ver tu perfil, nivel y estadísticas.' },
+            { cmd: '!config', desc: 'Configurar tu bio, nombre y edad.' },
+            { cmd: '!prestigio', desc: 'Ascender al llegar a nivel 500.' },
+            { cmd: '!mejor', desc: 'Top global de nivel y riqueza.' },
+            { cmd: '!dar <monto> @usuario', desc: 'Regalar diky a otro usuario.' },
+            { cmd: '!canjear <monto>', desc: 'Convertir diky en XP.' },
+            { cmd: '!marry @usuario / !divorce', desc: 'Matrimonio formal / divorciarse.' },
+            { cmd: '!clase', desc: 'Elegir tu profesión.' },
+            { cmd: '!inventario', desc: 'Ver tus items y mascotas.' },
+            { cmd: '!bounty', desc: 'Ver recompensas activas.' }
+        ]
+    },
+    {
+        id: 'mercado',
+        aliases: ['subastas', 'subasta', 'shop'],
+        icono: '⚖️',
+        titulo: 'MERCADO Y SUBASTAS',
+        resumen: 'Subastar, ofertar y vender items',
+        items: [
+            { cmd: '!subastar <item> <precio>', desc: 'Poner un item en subasta.' },
+            { cmd: '!subastas', desc: 'Ver subastas activas.' },
+            { cmd: '!ofertar <id> <monto>', desc: 'Pujar en una subasta.' },
+            { cmd: '!vender <item> / todo', desc: 'Vender items por diky.' }
+        ]
+    },
+    {
+        id: 'economia',
+        aliases: ['dinero', 'diky', 'eco'],
+        icono: '💰',
+        titulo: 'ECONOMÍA',
+        resumen: 'Daily, trabajo, robo, lotería y tienda',
+        items: [
+            { cmd: '!daily', desc: 'Recompensa gratis cada 24 horas.' },
+            { cmd: '!loteria', desc: 'Participar o ver la lotería.' },
+            { cmd: '!w', desc: 'Trabajar (1h de espera).' },
+            { cmd: '!slut', desc: 'Ganancia rápida de diky.' },
+            { cmd: '!robar', desc: 'Robar 75-250 diky (cada 15 min).' },
+            { cmd: '!tienda', desc: 'Ver lista de items en venta.' },
+            { cmd: '!comprar <número>', desc: 'Comprar un item de la tienda.' }
+        ]
+    },
+    {
+        id: 'casino',
+        aliases: ['apuestas', 'apuesta'],
+        icono: '🎰',
+        titulo: 'CASINO DIKY',
+        resumen: 'Blackjack, slots, minas, ruleta y dados',
+        items: [
+            { cmd: '!bj', desc: 'Jugar Blackjack.' },
+            { cmd: '!poker', desc: 'Duelo de dados.' },
+            { cmd: '!minas', desc: 'Juego del buscaminas.' },
+            { cmd: '!slot', desc: 'Tragamonedas.' },
+            { cmd: '!ruleta', desc: 'Ruleta rusa.' },
+            { cmd: '!apostar', desc: 'Apostar a rojo o blanco.' },
+            { cmd: '!dado / !moneda', desc: 'Lanzar dado o moneda.' },
+            { cmd: '!ppt / !pptx', desc: 'Piedra-papel-tijera (clásico / 9 elementos).' }
+        ]
+    },
+    {
+        id: 'aventura',
+        aliases: ['rpg', 'explorar'],
+        icono: '⚔️',
+        titulo: 'AVENTURA',
+        resumen: 'Minar, pescar, cazar, duelos y pokémon',
+        items: [
+            { cmd: '!minar', desc: 'Explorar la cueva.' },
+            { cmd: '!pescar', desc: 'Probar suerte en el mar.' },
+            { cmd: '!cazar', desc: 'Explorar el bosque.' },
+            { cmd: '!duelo @usuario', desc: 'Retar a combate a alguien.' },
+            { cmd: '!pokemon', desc: 'Atrapar un pokémon.' },
+            { cmd: '!puente', desc: 'Cruzar el puente de cristal.' },
+            { cmd: '!mazmorra', desc: 'Incursión por salas.' },
+            { cmd: '!cofre / !bomba / !carta / !donde', desc: 'Mini-juegos de suerte.' }
+        ]
+    },
+    {
+        id: 'juegos',
+        aliases: ['juego', 'trivia', 'minijuegos', 'duelos', 'pvp'],
+        icono: '🧠',
+        titulo: 'JUEGOS Y TRIVIA',
+        resumen: 'Trivias, duelos 1v1, bingo, wordle y retos',
+        items: [
+            { cmd: '!trivia / !quiz / !quizanime', desc: 'Preguntas de trivia y anime.' },
+            { cmd: '!adivina', desc: 'Adivinar la palabra oculta.' },
+            { cmd: '!matematicas', desc: 'Resolver cálculos contra reloj.' },
+            { cmd: '!bandera [pais/provincia/capitales]', desc: 'Adivinar banderas o capitales.' },
+            { cmd: '!ahorcado', desc: 'Juego del ahorcado.' },
+            { cmd: '!ahorcadoanime', desc: 'Ahorcado solo con nombres de anime.' },
+            { cmd: '!sopaletras', desc: 'Sopa de letras de anime, rondas infinitas.' },
+            { cmd: '!inglish [1|2|3|reseat]', desc: 'Español→inglés en 5 segundos (1 básico, 2 medio, 3 difícil) o reseat para estudiar escribiendo.' },
+            { cmd: '!carrera / !suelten', desc: 'Carreras del grupo.' },
+            { cmd: '!ttt @usuario', desc: 'Tres en raya contra alguien.' },
+            { cmd: '!pptpvp @usuario', desc: 'Piedra-papel-tijera con mapas secretos.' },
+            { cmd: '!c4 @usuario', desc: 'Conecta 4 contra alguien.' },
+            { cmd: '!quizduelo @usuario', desc: 'Duelo de preguntas, el más rápido gana.' },
+            { cmd: '!bingo', desc: 'Bingo grupal con cartones.' },
+            { cmd: '!dados @usuario', desc: 'Duelo de dados, mejor de 5 (!tirar).' },
+            { cmd: '!numero @usuario', desc: 'Adivina el secreto 1-100 por turnos.' },
+            { cmd: '!mates @usuario', desc: 'Carrera de operaciones, el rápido suma.' },
+            { cmd: '!carrera2 @usuario', desc: 'Carrera a 30 pasos (!avanza).' },
+            { cmd: '!naval @usuario', desc: 'Batalla naval 5x5 (!fuego B3).' },
+            { cmd: '!reflejos', desc: 'Responde al ¡AHORA! (récord).' },
+            { cmd: '!maraton', desc: '10 operaciones contra reloj (récord).' },
+            { cmd: '!simon', desc: 'Memoria de emojis (récord).' },
+            { cmd: '!hongbao @ana @luis', desc: 'Sobre rojo, reclama con !abrir.' },
+            { cmd: '!mentiroso @usuario', desc: 'Dados con apuesta (!apuesta) y duda (!duda).' },
+            { cmd: '!cadena', desc: 'Encadena palabras (!cadena <palabra>).' },
+            { cmd: '!traidor', desc: 'Roles secretos, excusas (!soy) y voto (!votar).' },
+            { cmd: '!botella @ana @luis', desc: 'Elimina uno por uno (!girar).' },
+            { cmd: '!pares @usuario', desc: 'Memorama 4x4 por turnos (!voltea A1 B2).' },
+            { cmd: '!ahorcado2 @usuario', desc: 'Uno pone la palabra, el otro adivina.' },
+            { cmd: '!palabron @usuario', desc: 'Palabra más larga con 6 letras (3 rondas).' },
+            { cmd: '!esgrima @usuario', desc: 'Atacar/bloquear/finta (!tira), 3 toques.' },
+            { cmd: '!puja @usuario', desc: 'Precio secreto, cercano sin pasarse.' },
+            { cmd: '!miento @usuario', desc: '2 verdades + 1 mentira (!cual 1-3).' },
+            { cmd: '!globo @usuario', desc: 'Infla por turnos (!inflar), explota y pierdes.' },
+            { cmd: '!anagrama @usuario', desc: 'Desordena la palabra, el rápido gana.' },
+            { cmd: '!rima @usuario', desc: 'Batalla de rimas por turnos.' },
+            { cmd: '!wordle', desc: 'Palabra de 5 letras en 6 intentos (récord).' },
+            { cmd: '!intruso', desc: 'Encuentra al infiltrado, 5 rondas (récord).' },
+            { cmd: '!supervivencia', desc: '7 retos con 3 vidas (récord).' },
+            { cmd: '!cazatesoros', desc: 'Número 1-50 con pistas de calor (récord).' },
+            { cmd: '!ruleta2', desc: 'Palabra de la categoría con esa letra (récord).' },
+            { cmd: '!escalera', desc: 'Serpientes y escaleras al 50 (récord).' },
+            { cmd: '!caja', desc: 'Caja fuerte de 3 dígitos (récord).' },
+            { cmd: '!emojimix 😂❤️', desc: 'Sticker mezclando 2 emojis.' }
+        ]
+    },
+    {
+        id: 'anime',
+        aliases: ['manga', 'media', 'descargas', 'otaku'],
+        icono: '🎬',
+        titulo: 'ANIME Y MEDIA',
+        resumen: 'Mangas en PDF, estrenos, animes y búsqueda visual',
+        items: [
+            { cmd: '!manga <nombre> / !leer', desc: 'Ver ficha o capítulos de un manga.' },
+            { cmd: '!buscar <nombre>', desc: 'Buscador de mangas.' },
+            { cmd: '!catalogo / !anime / !waifu', desc: 'Catálogo, info de anime e imágenes.' },
+            { cmd: '!anime reto', desc: 'Desafío de memoria de anime.' },
+            { cmd: '!personaje / !personaje random', desc: 'Info de personajes de anime.' },
+            { cmd: '!estrenos / !temporada', desc: 'Estrenos y anime de temporada.' },
+            { cmd: '!trace', desc: 'Buscar anime por imagen.' },
+            { cmd: '!proximo / !estudio', desc: 'Próximos estrenos e info de estudios.' },
+            { cmd: '!news', desc: 'Noticias de anime.' }
+        ]
+    },
+    {
+        id: 'waifus',
+        aliases: ['waifu', 'harem'],
+        icono: '🎀',
+        titulo: 'WAIFUS',
+        resumen: 'Tu top de waifus y desafíos de memoria',
+        items: [
+            { cmd: '!waifus top', desc: 'Ver tu top de waifus.' },
+            { cmd: '!waifus @user', desc: 'Ver el top de otro usuario.' },
+            { cmd: '!waifus set <lista>', desc: 'Agregar waifus a tu top.' },
+            { cmd: '!waifus config <#> <nombre>', desc: 'Editar una posición de tu top.' },
+            { cmd: '!waifus reset', desc: 'Borrar tu lista.' },
+            { cmd: '!waifus random', desc: '10 waifus aleatorias.' },
+            { cmd: '!waifus reto', desc: 'Desafío de memoria.' }
+        ]
+    },
+    {
+        id: 'humor',
+        aliases: ['diversion', 'fun', 'entretenimiento'],
+        icono: '🎭',
+        titulo: 'DIVERSIÓN Y HUMOR',
+        resumen: 'Ship, medidores, chistes, retos y sorteos',
+        items: [
+            { cmd: '!ship @user @user', desc: 'Compatibilidad amorosa entre dos.' },
+            { cmd: '!love @user', desc: 'Cuánto te quiere el bot.' },
+            { cmd: '!gay / !iq / !suerte', desc: 'Medidores divertidos.' },
+            { cmd: '!top <tema>', desc: 'Ranking del grupo con el tema que pongas.' },
+            { cmd: '!horoscopo / !8ball', desc: 'Horóscopo y bola mágica.' },
+            { cmd: '!roast / !cumplido @user', desc: 'Insulto o cumplido gracioso.' },
+            { cmd: '!hacker @user', desc: 'Hackeo falso a un usuario.' },
+            { cmd: '!chiste / !reto / !verdad', desc: 'Chistes y retos de verdad o reto.' },
+            { cmd: '!seria', desc: '¿Qué preferirías?' },
+            { cmd: '!rifa <opc1, opc2, ...>', desc: 'Sorteo por texto entre opciones.' }
+        ]
+    },
+    {
+        id: 'reacciones',
+        aliases: ['reaccion', 'acciones', 'gif', 'gifs'],
+        icono: '✨',
+        titulo: 'REACCIONES ANIME',
+        resumen: 'GIFs anime de abrazo, beso, golpe y más',
+        items: [
+            { cmd: '!pat / !hug / !kiss / !slap' },
+            { cmd: '!punch / !kill / !cry / !dance' },
+            { cmd: '!bite / !highfive / !fumar / !cafe' },
+            { cmd: '!puchero / !sonrojar / !baka / !dormir' },
+            { cmd: '!comiendo / !pensar / !patear / !risa' },
+            { cmd: '!celebrar / !aburrido / !smug / !stare', desc: 'Gifs de reacción (menciona a alguien).' }
+        ]
+    },
+    {
+        id: 'herramientas',
+        aliases: ['herramienta', 'sticker', 'stickers', 'util', 'utilidades', 'tools'],
+        icono: '🛠️',
+        titulo: 'HERRAMIENTAS',
+        resumen: 'Stickers (15s), voz, letras y utilidades',
+        items: [
+            { cmd: '!s', desc: 'Sticker de imagen o video/audio hasta 15s (responde o pon !s).' },
+            { cmd: '!toimg', desc: 'Convertir sticker a foto.' },
+            { cmd: '!decir <texto>', desc: 'El bot lo dice con voz grave.' },
+            { cmd: '!setdecir', desc: 'Ver los 15 idiomas de !decir.' },
+            { cmd: '!letra <canción>', desc: 'Letra de la canción.' },
+            { cmd: '!gstick <nombre> / !stick <nombre>', desc: 'Guarda stickers con nombre y recupéralos.' },
+            { cmd: '!wiki <texto> / !ascii <texto>', desc: 'Buscar en wiki o arte ASCII.' },
+            { cmd: '!v <texto>', desc: 'Sticker con texto.' },
+            { cmd: '!ver @usuario', desc: 'Ver foto de perfil de alguien.' },
+            { cmd: '!ping', desc: 'Estado real del bot.' }
+        ]
+    }
+];
+
+function normalizarClaveMenu(valor) {
+    return String(valor || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .toLowerCase();
+}
+
+function buscarSeccionMenu(clave) {
+    const norm = normalizarClaveMenu(clave);
+    if (!norm) return null;
+    return MENU_SECCIONES.find(s => s.id === norm || s.aliases.includes(norm)) || null;
+}
+
+function renderSeccionMenu(seccion) {
+    const out = [`${seccion.icono} *[ ${seccion.titulo} ]*`];
+    for (const item of seccion.items) {
+        out.push(`• *${item.cmd}*`);
+        if (item.desc) out.push(`└ _${item.desc}_`);
+    }
+    return out.join('\n');
+}
+
+function construirMenuCompacto({ pushName, uptimeH, uptimeM, motto }) {
+    const categorias = MENU_SECCIONES
+        .map(s => `• ${s.icono} *!menu ${s.id}* — ${s.resumen} (${s.items.length})`)
+        .join('\n');
+    return `✨ *DIKY BOT V3 - PANEL MAESTRO* ✨\n`
+        + `📜 _"${motto}"_\n`
+        + `━━━━━━━━━━━━━━━━━━━━━━\n`
+        + `👤 *${pushName}*  |  🕒 *${uptimeH}h ${uptimeM}m*  |  💰 *diky*\n`
+        + `━━━━━━━━━━━━━━━━━━━━━━\n\n`
+        + `📂 *Categorías disponibles:*\n${categorias}\n\n`
+        + `━━━━━━━━━━━━━━━━━━━━━━\n`
+        + `📜 *!menu todo* — Ver todos los comandos\n`
+        + `❓ *!help <comando>* — Ayuda detallada (ej: *!help s*)`;
+}
+
+function construirMenuCompleto({ pushName, uptimeH, uptimeM, motto }) {
+    const cuerpo = MENU_SECCIONES.map(renderSeccionMenu).join('\n\n');
+    return `✨ *DIKY BOT V3 - PANEL MAESTRO* ✨\n`
+        + `📜 _"${motto}"_\n`
+        + `━━━━━━━━━━━━━━━━━━━━━━\n\n`
+        + `👤 *USUARIO:* ${pushName}\n`
+        + `🕒 *UPTIME:* ${uptimeH}h ${uptimeM}m\n`
+        + `💰 *MONEDA:* diky\n\n`
+        + `━━━━━━━━━━━━━━━━━━━━━━\n\n`
+        + `${cuerpo}\n\n`
+        + `━━━━━━━━━━━━━━━━━━━━━━\n`
+        + `> _Escribe un comando para empezar._\n`
+        + `> _Diky Bot V3 - El bot más completo._`;
+}
+
+function formatearAyudaComando(commandName, help) {
+    let response = `❓ *AYUDA: ${commandName}*\n\n`;
+    response += `📖 *Descripción:*\n${help.desc}\n\n`;
+    response += `📝 *Uso:*\n\`\`\`${help.usage}\`\`\`\n\n`;
+    response += `💡 *Ejemplo:*\n${help.ejemplo}\n\n`;
+    response += `📋 *Argumentos:* ${help.args}\n`;
+    response += `⏱️ *Cooldown:* ${help.cooldown}`;
+    if (help.alias) response += `\n🔁 *Alias:* ${help.alias}`;
+    return response;
+}
+
 module.exports = {
     name: 'main',
     isMultiple: true,
@@ -63,30 +385,27 @@ module.exports = {
         // Se elimino la version duplicada de aqui, que nunca se ejecutaba (ping.js
         // se carga despues alfabeticamente y sobrescribe el registro de este comando).
 
-        // !help <comando> - Ayuda detallada de un comando especifico
-        // (!help sin argumento sigue cayendo al menu general de abajo, sin cambios)
+        // !help <comando> - Ayuda detallada de un comando o categoría
         if (start === '!help' && args[0]) {
-            const commandName = args[0].startsWith('!') ? args[0] : '!' + args[0];
+            const rawArg = String(args[0]).trim().toLowerCase();
+            const commandName = rawArg.startsWith('!') ? rawArg : '!' + rawArg;
             const help = helpData[commandName];
 
             if (!help) {
+                const secHelp = buscarSeccionMenu(rawArg);
+                if (secHelp) {
+                    const textoSec = `${renderSeccionMenu(secHelp)}\n\n💡 _Usa *!menu* para ver todas las categorías._`;
+                    return sock.sendMessage(chatId, { text: textoSec }, { quoted: msg });
+                }
                 return sock.sendMessage(chatId, {
-                    text: `❌ No tengo ayuda detallada para *${commandName}*.\n\nUsa *!menu* para ver todos los comandos disponibles.`
+                    text: `❌ No tengo ayuda detallada para *${commandName}*.\n\nUsa *!menu* para ver las categorías disponibles.`
                 }, { quoted: msg });
             }
 
-            let response = `❓ *AYUDA: ${commandName}*\n\n`;
-            response += `📖 *Descripción:*\n${help.desc}\n\n`;
-            response += `📝 *Uso:*\n\`\`\`${help.usage}\`\`\`\n\n`;
-            response += `💡 *Ejemplo:*\n${help.ejemplo}\n\n`;
-            response += `📋 *Argumentos:* ${help.args}\n`;
-            response += `⏱️ *Cooldown:* ${help.cooldown}`;
-            if (help.alias) response += `\n🔁 *Alias:* ${help.alias}`;
-
-            return sock.sendMessage(chatId, { text: response }, { quoted: msg });
+            return sock.sendMessage(chatId, { text: formatearAyudaComando(commandName, help) }, { quoted: msg });
         }
 
-        // !menu / !menu2 (REDiseño TOTAL PROFESIONAL Y EXHAUSTIVO)
+        // !menu / !menu2 / !help (sin argumento -> compacto por categorías)
         if (start === '!menu' || start === '!menu2' || start === '!help') {
             const pick = (v) => v[Math.floor(Math.random() * v.length)];
 
@@ -149,7 +468,51 @@ module.exports = {
                 return enviarMenuConPortada(sock, chatId, msg, db, mt);
             }
 
-            // ── MENÚ COMPLETO (modo normal) ──
+            // ── MENÚ COMPACTO / POR CATEGORÍA / COMPLETO (modo normal) ──
+            const subArg = normalizarClaveMenu(args[0]);
+            if (subArg) {
+                if (subArg === 'todo' || subArg === 'completo' || subArg === 'all' || subArg === 'full') {
+                    const mottos = [
+                        "¡Tu compañero digital definitivo!",
+                        "¡El bot más loco de WhatsApp!",
+                        "¡Divirtiéndote desde el primer día!",
+                        "¡Llevando el grupo al siguiente nivel!",
+                        "¡Economía, juegos y mucha diversión!",
+                        "¡El bot que tu grupo merece!",
+                        "¡Diky Bot: Potencia y Estilo!",
+                        "¡Donde la tecnología encuentra la risa!"
+                    ];
+                    const up = Math.floor((Date.now() - botState.startTime) / 1000);
+                    const fullText = construirMenuCompleto({
+                        pushName,
+                        uptimeH: Math.floor(up / 3600),
+                        uptimeM: Math.floor((up % 3600) / 60),
+                        motto: pick(mottos)
+                    });
+                    return enviarMenuConPortada(sock, chatId, msg, db, fullText);
+                }
+
+                const seccion = buscarSeccionMenu(subArg);
+                if (seccion) {
+                    const text = `${renderSeccionMenu(seccion)}\n\n━━━━━━━━━━━━━━━━━━━━━━\n`
+                        + `📂 _Usa *!menu* para otras categorías o *!menu todo* para ver todo._\n`
+                        + `❓ _Usa *!help <comando>* para ver ejemplos._`;
+                    return sock.sendMessage(chatId, { text }, { quoted: msg });
+                }
+
+                if (subArg.startsWith('!')) {
+                    const helpCmd = helpData[subArg];
+                    if (helpCmd) {
+                        return sock.sendMessage(chatId, { text: formatearAyudaComando(subArg, helpCmd) }, { quoted: msg });
+                    }
+                }
+
+                const ids = MENU_SECCIONES.map(s => `*${s.id}*`).join(', ');
+                return sock.sendMessage(chatId, {
+                    text: `📂 No encontré la categoría *${args[0]}*.\n\nCategorías válidas: ${ids}, *todo*.\nEjemplo: *!menu juegos*`
+                }, { quoted: msg });
+            }
+
             const mottos = [
                 "¡Tu compañero digital definitivo!",
                 "¡El bot más loco de WhatsApp!",
@@ -161,335 +524,14 @@ module.exports = {
                 "¡Donde la tecnología encuentra la risa!"
             ];
             const up = Math.floor((Date.now() - botState.startTime) / 1000);
-            const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60);
+            const compactText = construirMenuCompacto({
+                pushName,
+                uptimeH: Math.floor(up / 3600),
+                uptimeM: Math.floor((up % 3600) / 60),
+                motto: pick(mottos)
+            });
 
-            let mText = `✨ *DIKY BOT V3 - PANEL MAESTRO* ✨\n`;
-            mText += `📜 _"${pick(mottos)}"_\n`;
-            mText += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-
-            mText += `👤 *USUARIO:* ${pushName}\n`;
-            mText += `🕒 *UPTIME:* ${h}h ${m}m\n`;
-            mText += `💰 *MONEDA:* diky\n\n`;
-            mText += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-
-            mText += `👑 *[ ADMINISTRACIÓN ]*\n`;
-            mText += `• *!bot <on/off>*\n`;
-            mText += `└ _Encender o apagar el bot en el grupo._\n`;
-            mText += `• *!adm <on/off>*\n`;
-            mText += `└ _Solo admins pueden usar comandos._\n`;
-            mText += `• *!antispam <on/off>*\n`;
-            mText += `└ _Activar protección anti-spam._\n`;
-            mText += `• *!antifarma <on/off>*\n`;
-            mText += `└ _Tope 5 premios/hora. Off = grupo 100% juego._\n`;
-            mText += `• *!autoadmin*\n`;
-            mText += `└ _El bot intenta hacerse admin solo._\n`;
-            mText += `• *!remoto <id-grupo> bot/adm on/off*\n`;
-            mText += `└ _Control del dueño por privado (antitrampa)._\n`;
-            mText += `• *!tag*\n`;
-            mText += `└ _Mencionar a todos los miembros._\n`;
-            mText += `• *!kick*\n`;
-            mText += `└ _Eliminar un usuario del grupo._\n`;
-            mText += `• *!bienvenida <on/off/ver/test>*\n`;
-            mText += `└ _Configurar el mensaje de bienvenida._\n`;
-            mText += `• *!setbienvenida <mensaje>*\n`;
-            mText += `└ _Guardar mensaje personalizado ({usuario})._\n`;
-            mText += `• *!despedida <on/off/ver/test>*\n`;
-            mText += `└ _Mensaje cuando alguien sale del grupo._\n`;
-            mText += `• *!setdespedida <mensaje>*\n`;
-            mText += `└ _Guardar despedida personalizada ({usuario})._\n`;
-            mText += `• *!setportada*\n`;
-            mText += `└ _Portada de ESTE grupo (menú, bienvenida y despedida)._\n`;
-            mText += `• *!setsticker*\n`;
-            mText += `└ _Sticker de bienvenida (responde a un sticker)._\n`;
-            mText += `• *!reglas*\n`;
-            mText += `└ _Ver o configurar reglas del grupo._\n`;
-            mText += `• *!setreglas <texto> / !borrareglas*\n`;
-            mText += `└ _Reglas propias del grupo (admin)._\n`;
-            mText += `• *!fantasmas*\n`;
-            mText += `└ _Sin hablar en los últimos 7 días._\n`;
-            mText += `• *!sorteo*\n`;
-            mText += `└ _Elegir un miembro random del grupo._\n`;
-            mText += `• *!encuesta <preg> | <op1> | <op2>*\n`;
-            mText += `└ _Crear encuesta de WhatsApp._\n`;
-            mText += `• *!warn @usuario [motivo]*\n`;
-            mText += `└ _Advertir (3 = expulsión)._\n`;
-            mText += `• *!unwarn / !warns @usuario*\n`;
-            mText += `└ _Quitar o ver advertencias._\n`;
-            mText += `• *!afk [motivo]*\n`;
-            mText += `└ _Marcarse ausente._\n`;
-            mText += `• *!topactivos*\n`;
-            mText += `└ _Ranking de los que más hablan._\n`;
-            mText += `• *!recordar <tiempo> <texto>*\n`;
-            mText += `└ _Aviso futuro (s/m/h/d)._\n\n`;
-
-            mText += `👤 *[ PERFIL Y SOCIAL ]*\n`;
-            mText += `• *!perfil*\n`;
-            mText += `└ _Ver tu perfil, nivel y estadísticas._\n`;
-            mText += `• *!config*\n`;
-            mText += `└ _Configurar tu bio, nombre y edad._\n`;
-            mText += `• *!prestigio*\n`;
-            mText += `└ _Ascender al llegar a nivel 500._\n`;
-            mText += `• *!mejor*\n`;
-            mText += `└ _Top global de nivel y riqueza._\n`;
-            mText += `• *!dar <monto> @usuario*\n`;
-            mText += `└ _Regalar diky a otro usuario._\n`;
-            mText += `• *!canjear <monto>*\n`;
-            mText += `└ _Convertir diky en XP._\n`;
-            mText += `• *!marry @usuario / !divorce*\n`;
-            mText += `└ _Matrimonio formal / divorciarse._\n`;
-            mText += `• *!clase*\n`;
-            mText += `└ _Elegir tu profesión._\n`;
-            mText += `• *!inventario*\n`;
-            mText += `└ _Ver tus items y mascotas._\n`;
-            mText += `• *!bounty*\n`;
-            mText += `└ _Ver recompensas activas._\n\n`;
-
-            mText += `⚖️ *[ MERCADO Y SUBASTAS ]*\n`;
-            mText += `• *!subastar <item> <precio>*\n`;
-            mText += `└ _Poner un item en subasta._\n`;
-            mText += `• *!subastas*\n`;
-            mText += `└ _Ver subastas activas._\n`;
-            mText += `• *!ofertar <id> <monto>*\n`;
-            mText += `└ _Pujar en una subasta._\n`;
-            mText += `• *!vender <item> / todo*\n`;
-            mText += `└ _Vender items por diky._\n\n`;
-
-            mText += `💰 *[ ECONOMÍA ]*\n`;
-            mText += `• *!daily*\n`;
-            mText += `└ _Recompensa gratis cada 24 horas._\n`;
-            mText += `• *!loteria*\n`;
-            mText += `└ _Participar o ver la lotería._\n`;
-            mText += `• *!w*\n`;
-            mText += `└ _Trabajar (1h de espera)._\n`;
-            mText += `• *!slut*\n`;
-            mText += `└ _Ganancia rápida de diky._\n`;
-            mText += `• *!robar*\n`;
-            mText += `└ _Robar 75-250 diky (cada 15 min)._\n`;
-            mText += `• *!tienda*\n`;
-            mText += `└ _Ver lista de items en venta._\n`;
-            mText += `• *!comprar <número>*\n`;
-            mText += `└ _Comprar un item de la tienda._\n\n`;
-
-            mText += `🎰 *[ CASINO DIKY ]*\n`;
-            mText += `• *!bj*\n`;
-            mText += `└ _Jugar Blackjack._\n`;
-            mText += `• *!poker*\n`;
-            mText += `└ _Duelo de dados._\n`;
-            mText += `• *!minas*\n`;
-            mText += `└ _Juego del buscaminas._\n`;
-            mText += `• *!slot*\n`;
-            mText += `└ _Tragamonedas._\n`;
-            mText += `• *!ruleta*\n`;
-            mText += `└ _Ruleta rusa._\n`;
-            mText += `• *!apostar*\n`;
-            mText += `└ _Apostar a rojo o blanco._\n`;
-            mText += `• *!dado / !moneda*\n`;
-            mText += `└ _Lanzar dado o moneda._\n`;
-            mText += `• *!ppt / !pptx*\n`;
-            mText += `└ _Piedra-papel-tijera (clásico / 9 elementos)._\n\n`;
-
-            mText += `⚔️ *[ AVENTURA ]*\n`;
-            mText += `• *!minar*\n`;
-            mText += `└ _Explorar la cueva._\n`;
-            mText += `• *!pescar*\n`;
-            mText += `└ _Probar suerte en el mar._\n`;
-            mText += `• *!cazar*\n`;
-            mText += `└ _Explorar el bosque._\n`;
-            mText += `• *!duelo @usuario*\n`;
-            mText += `└ _Retar a combate a alguien._\n`;
-            mText += `• *!pokemon*\n`;
-            mText += `└ _Atrapar un pokémon._\n`;
-            mText += `• *!puente*\n`;
-            mText += `└ _Cruzar el puente de cristal._\n`;
-            mText += `• *!mazmorra*\n`;
-            mText += `└ _Incursión por salas._\n`;
-            mText += `• *!cofre / !bomba / !carta / !donde*\n`;
-            mText += `└ _Mini-juegos de suerte._\n\n`;
-
-            mText += `🧠 *[ JUEGOS Y TRIVIA ]*\n`;
-            mText += `• *!trivia / !quiz / !quizanime*\n`;
-            mText += `└ _Preguntas de trivia y anime._\n`;
-            mText += `• *!adivina*\n`;
-            mText += `└ _Adivinar la palabra oculta._\n`;
-            mText += `• *!matematicas*\n`;
-            mText += `└ _Resolver cálculos contra reloj._\n`;
-            mText += `• *!bandera [pais/provincia/capitales]*\n`;
-            mText += `└ _Adivinar banderas o capitales._\n`;
-            mText += `• *!ahorcado*\n`;
-            mText += `└ _Juego del ahorcado._\n`;
-            mText += `• *!ahorcadoanime*\n`;
-            mText += `└ _Ahorcado solo con nombres de anime._\n`;
-            mText += `• *!sopaletras*\n`;
-            mText += `└ _Sopa de letras de anime, rondas infinitas._\n`;
-            mText += `• *!inglish [1|2|3|reseat]*\n`;
-            mText += `└ _Español→inglés en 5 segundos (1 básico, 2 medio, 3 difícil) o reseat para estudiar escribiendo._\n`;
-            mText += `• *!carrera / !suelten*\n`;
-            mText += `└ _Carreras del grupo._\n`;
-            mText += `• *!ttt @usuario*\n`;
-            mText += `└ _Tres en raya contra alguien._\n`;
-            mText += `• *!pptpvp @usuario*\n`;
-            mText += `└ _Piedra-papel-tijera con mapas secretos._\n`;
-            mText += `• *!c4 @usuario*\n`;
-            mText += `└ _Conecta 4 contra alguien._\n`;
-            mText += `• *!quizduelo @usuario*\n`;
-            mText += `└ _Duelo de preguntas, el más rápido gana._\n`;
-            mText += `• *!bingo*\n`;
-            mText += `└ _Bingo grupal con cartones._\n`;
-            mText += `• *!dados @usuario*\n`;
-            mText += `└ _Duelo de dados, mejor de 5 (!tirar)._\n`;
-            mText += `• *!numero @usuario*\n`;
-            mText += `└ _Adivina el secreto 1-100 por turnos._\n`;
-            mText += `• *!mates @usuario*\n`;
-            mText += `└ _Carrera de operaciones, el rápido suma._\n`;
-            mText += `• *!carrera2 @usuario*\n`;
-            mText += `└ _Carrera a 30 pasos (!avanza)._\n`;
-            mText += `• *!naval @usuario*\n`;
-            mText += `└ _Batalla naval 5x5 (!fuego B3)._\n`;
-            mText += `• *!reflejos*\n`;
-            mText += `└ _Responde al ¡AHORA! (récord)._\n`;
-            mText += `• *!maraton*\n`;
-            mText += `└ _10 operaciones contra reloj (récord)._\n`;
-            mText += `• *!simon*\n`;
-            mText += `└ _Memoria de emojis (récord)._\n`;
-            mText += `• *!hongbao @ana @luis*\n`;
-            mText += `└ _Sobre rojo, reclama con !abrir._\n`;
-            mText += `• *!mentiroso @usuario*\n`;
-            mText += `└ _Dados con apuesta (!apuesta) y duda (!duda)._\n`;
-            mText += `• *!cadena*\n`;
-            mText += `└ _Encadena palabras (!cadena <palabra>)._\n`;
-            mText += `• *!traidor*\n`;
-            mText += `└ _Roles secretos, excusas (!soy) y voto (!votar)._\n`;
-            mText += `• *!botella @ana @luis*\n`;
-            mText += `└ _Elimina uno por uno (!girar)._\n`;
-            mText += `• *!pares @usuario*\n`;
-            mText += `└ _Memorama 4x4 por turnos (!voltea A1 B2)._\n`;
-            mText += `• *!ahorcado2 @usuario*\n`;
-            mText += `└ _Uno pone la palabra, el otro adivina._\n`;
-            mText += `• *!palabron @usuario*\n`;
-            mText += `└ _Palabra más larga con 6 letras (3 rondas)._\n`;
-            mText += `• *!esgrima @usuario*\n`;
-            mText += `└ _Atacar/bloquear/finta (!tira), 3 toques._\n`;
-            mText += `• *!puja @usuario*\n`;
-            mText += `└ _Precio secreto, cercano sin pasarse._\n`;
-            mText += `• *!miento @usuario*\n`;
-            mText += `└ _2 verdades + 1 mentira (!cual 1-3)._\n`;
-            mText += `• *!globo @usuario*\n`;
-            mText += `└ _Infla por turnos (!inflar), explota y pierdes._\n`;
-            mText += `• *!anagrama @usuario*\n`;
-            mText += `└ _Desordena la palabra, el rápido gana._\n`;
-            mText += `• *!rima @usuario*\n`;
-            mText += `└ _Batalla de rimas por turnos._\n`;
-            mText += `• *!wordle*\n`;
-            mText += `└ _Palabra de 5 letras en 6 intentos (récord)._\n`;
-            mText += `• *!intruso*\n`;
-            mText += `└ _Encuentra al infiltrado, 5 rondas (récord)._\n`;
-            mText += `• *!supervivencia*\n`;
-            mText += `└ _7 retos con 3 vidas (récord)._\n`;
-            mText += `• *!cazatesoros*\n`;
-            mText += `└ _Número 1-50 con pistas de calor (récord)._\n`;
-            mText += `• *!ruleta2*\n`;
-            mText += `└ _Palabra de la categoría con esa letra (récord)._\n`;
-            mText += `• *!escalera*\n`;
-            mText += `└ _Serpientes y escaleras al 50 (récord)._\n`;
-            mText += `• *!caja*\n`;
-            mText += `└ _Caja fuerte de 3 dígitos (récord)._\n`;
-            mText += `• *!emojimix 😂❤️*\n`;
-            mText += `└ _Sticker mezclando 2 emojis._\n\n`;
-
-            mText += `🎬 *[ ANIME Y MEDIA ]*\n`;
-            mText += `• *!manga <nombre> / !leer*\n`;
-            mText += `└ _Ver ficha o capítulos de un manga._\n`;
-            mText += `• *!buscar <nombre>*\n`;
-            mText += `└ _Buscador de mangas._\n`;
-            mText += `• *!catalogo / !anime / !waifu*\n`;
-            mText += `└ _Catálogo, info de anime e imágenes._\n`;
-            mText += `• *!anime reto*\n`;
-            mText += `└ _Desafío de memoria de anime._\n`;
-            mText += `• *!personaje / !personaje random*\n`;
-            mText += `└ _Info de personajes de anime._\n`;
-            mText += `• *!estrenos / !temporada*\n`;
-            mText += `└ _Estrenos y anime de temporada._\n`;
-            mText += `• *!trace*\n`;
-            mText += `└ _Buscar anime por imagen._\n`;
-            mText += `• *!proximo / !estudio*\n`;
-            mText += `└ _Próximos estrenos e info de estudios._\n`;
-            mText += `• *!news*\n`;
-            mText += `└ _Noticias de anime._\n\n`;
-
-            mText += `🎀 *[ WAIFUS ]*\n`;
-            mText += `• *!waifus top*\n`;
-            mText += `└ _Ver tu top de waifus._\n`;
-            mText += `• *!waifus @user*\n`;
-            mText += `└ _Ver el top de otro usuario._\n`;
-            mText += `• *!waifus set <lista>*\n`;
-            mText += `└ _Agregar waifus a tu top._\n`;
-            mText += `• *!waifus config <#> <nombre>*\n`;
-            mText += `└ _Editar una posición de tu top._\n`;
-            mText += `• *!waifus reset*\n`;
-            mText += `└ _Borrar tu lista._\n`;
-            mText += `• *!waifus random*\n`;
-            mText += `└ _10 waifus aleatorias._\n`;
-            mText += `• *!waifus reto*\n`;
-            mText += `└ _Desafío de memoria._\n\n`;
-
-            mText += `🎭 *[ DIVERSIÓN Y HUMOR ]*\n`;
-            mText += `• *!ship @user @user*\n`;
-            mText += `└ _Compatibilidad amorosa entre dos._\n`;
-            mText += `• *!love @user*\n`;
-            mText += `└ _Cuánto te quiere el bot._\n`;
-            mText += `• *!gay / !iq / !suerte*\n`;
-            mText += `└ _Medidores divertidos._\n`;
-            mText += `• *!top <tema>*\n`;
-            mText += `└ _Ranking del grupo con el tema que pongas._\n`;
-            mText += `• *!horoscopo / !8ball*\n`;
-            mText += `└ _Horóscopo y bola mágica._\n`;
-            mText += `• *!roast / !cumplido @user*\n`;
-            mText += `└ _Insulto o cumplido gracioso._\n`;
-            mText += `• *!hacker @user*\n`;
-            mText += `└ _Hackeo falso a un usuario._\n`;
-            mText += `• *!chiste / !reto / !verdad*\n`;
-            mText += `└ _Chistes y retos de verdad o reto._\n`;
-            mText += `• *!seria*\n`;
-            mText += `└ _¿Qué preferirías?_\n`;
-            mText += `• *!rifa <opc1, opc2, ...>*\n`;
-            mText += `└ _Sorteo por texto entre opciones._\n\n`;
-
-            mText += `✨ *[ REACCIONES ANIME ]*\n`;
-            mText += `• *!pat / !hug / !kiss / !slap*\n`;
-            mText += `• *!punch / !kill / !cry / !dance*\n`;
-            mText += `• *!bite / !highfive / !fumar / !cafe*\n`;
-            mText += `• *!puchero / !sonrojar / !baka / !dormir*\n`;
-            mText += `• *!comiendo / !pensar / !patear / !risa*\n`;
-            mText += `• *!celebrar / !aburrido / !smug / !stare*\n`;
-            mText += `└ _Gifs de reacción (menciona a alguien)._\n\n`;
-
-            mText += `🛠️ *[ HERRAMIENTAS ]*\n`;
-            mText += `• *!s*\n`;
-            mText += `└ _Sticker de imagen/video (responde a una imagen o video)._\n`;
-            mText += `• *!toimg*\n`;
-            mText += `└ _Convertir sticker a foto._\n`;
-            mText += `• *!decir <texto>*\n`;
-            mText += `└ _El bot lo dice con voz grave._\n`;
-            mText += `• *!setdecir*\n`;
-            mText += `└ _Ver los 15 idiomas de !decir._\n`;
-            mText += `• *!letra <canción>*\n`;
-            mText += `└ _Letra de la canción._\n`;
-            mText += `• *!gstick <nombre> / !stick <nombre>*\n`;
-            mText += `└ _Guarda stickers con nombre y recupéralos._\n`;
-            mText += `• *!wiki <texto> / !ascii <texto>*\n`;
-            mText += `└ _Buscar en wiki o arte ASCII._\n`;
-            mText += `• *!v <texto>*\n`;
-            mText += `└ _Sticker con texto._\n`;
-            mText += `• *!ver @usuario*\n`;
-            mText += `└ _Ver foto de perfil de alguien._\n`;
-            mText += `• *!ping*\n`;
-            mText += `└ _Estado real del bot._\n\n`;
-
-            mText += `━━━━━━━━━━━━━━━━━━━━━━\n`;
-            mText += `> _Escribe un comando para empezar._\n`;
-            mText += `> _Diky Bot V3 - El bot más completo._`;
-
-            return enviarMenuConPortada(sock, chatId, msg, db, mText);
+            return enviarMenuConPortada(sock, chatId, msg, db, compactText);
         }
 
         // !sticker / !s
@@ -546,7 +588,7 @@ module.exports = {
                 // desde el log de Render sin adivinar.
                 if (quoted) console.warn('[STICKER] Citado sin media reconocible. Claves:', Object.keys(quoted).join(','));
                 return sock.sendMessage(chatId, {
-                    text: '*Como usar el sticker maker:*\n\n• Responde a una imagen/video con *!s*.\n• Video: cualquier duración, sale con sonido (se usan los primeros segundos).\n• Imagen con sonido: responde al audio con la imagen y pon *!s* de caption.\n\nEl sonido se reproduce en clientes con stickers con sonido (beta).'
+                    text: '*Como usar el sticker maker:*\n\n• Responde a una imagen/video con *!s*.\n• Video/GIF: hasta 15 segundos, sale con sonido.\n• Imagen con sonido: responde al audio (hasta 15s) con la imagen y pon *!s* de caption.\n\nEl sonido se reproduce en clientes con stickers con sonido (beta).'
                 }, { quoted: msg });
             }
 
@@ -559,11 +601,11 @@ module.exports = {
                 || (media === msg.message?.documentMessage && msgDocEsVideo)
                 || (media === citada?.documentMessage && docEsVideo));
             // Video largo: NO se rechaza, se convierte igual. ffmpeg recorta
-            // solo los primeros segundos del sticker (-t 6) y el tope real es
-            // la descarga de 15MB. Antes: error "demasiado largo".
+            // solo los primeros 15 segundos (-t 15) y el tope real es
+            // la descarga de 15MB.
             const videoInfo = esVideo ? media : null;
-            if (videoInfo && videoInfo.seconds > 10) {
-                console.log(`[STICKER] Video largo (${Math.round(videoInfo.seconds)}s): se convierte con los primeros segundos.`);
+            if (videoInfo && videoInfo.seconds > 15) {
+                console.log(`[STICKER] Video largo (${Math.round(videoInfo.seconds)}s): se convierte con los primeros 15 segundos.`);
             }
 
             const entradaMedia = mediaPropia ? msg : { key: msg.key, message: citada };
@@ -678,10 +720,10 @@ module.exports = {
                             if (audioCitado) {
                                 const audioBuf = await descargarConTimeout(downloadMediaMessage, { key: msg.key, message: citada });
                                 if (audioBuf && audioBuf.length && audioBuf.length <= 15 * 1024 * 1024) {
-                                    return await fallbackAudio(audioBuf, 10);
+                                    return await fallbackAudio(audioBuf, 15);
                                 }
                             }
-                            if (esVideo) return await fallbackAudio(buffer, 6);
+                            if (esVideo) return await fallbackAudio(buffer, 15);
                         } catch (eAudio) {
                             console.warn('[STICKER] No pude preparar el sonido:', eAudio.message);
                         }

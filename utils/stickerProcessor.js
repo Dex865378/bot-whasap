@@ -12,6 +12,21 @@ const { prepararAudioParaSticker } = require('./stickerSonido');
 
 const execFileAsync = promisify(execFile);
 
+const STICKER_MAX_SEGUNDOS = 15;
+const STICKER_VIDEO_FPS = 15;
+const MAX_STICKER_WEBP_BYTES = 920 * 1024; // Margen bajo el tope de ~1 MB de WhatsApp WebP animado
+
+const PERFILES_VIDEO_PC = [
+    { scale: 512, fps: STICKER_VIDEO_FPS, quality: 45, comp: 1 },
+    { scale: 320, fps: STICKER_VIDEO_FPS, quality: 35, comp: 2 },
+    { scale: 256, fps: 12, quality: 30, comp: 2 }
+];
+const PERFILES_VIDEO_LOCAL = [
+    { scale: 384, fps: STICKER_VIDEO_FPS, quality: 40, comp: 1 },
+    { scale: 320, fps: 12, quality: 32, comp: 2 },
+    { scale: 256, fps: 10, quality: 28, comp: 2 }
+];
+
 let _cachedFfmpegPath = null;
 const _vsyncArgsCache = new Map();
 
@@ -92,9 +107,10 @@ function resolverFfmpeg(preferido = null) {
 async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
     const ffmpegPath = resolverFfmpeg(opts.ffmpegPath);
-    const vf = 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=white@0,format=yuva420p';
+    const vfBase = (scale, interp) =>
+        `scale=${scale}:${scale}:force_original_aspect_ratio=decrease:flags=${interp},format=rgba,pad=${scale}:${scale}:(ow-iw)/2:(oh-ih)/2:color=white@0,format=yuva420p`;
 
-    const intentar = async (comoVideo, soloUnFrame = false, bufOverride = null) => {
+    const intentar = async (comoVideo, soloUnFrame = false, bufOverride = null, perfil = null) => {
         const src = bufOverride || buffer;
         const ext = extParaBuffer(src, comoVideo || esMp4(src));
         const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -104,11 +120,14 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
         try {
             const videoThreads = String(opts.videoThreads || 1);
             const imgThreads = String(opts.imgThreads || 2);
-            const vsyncArgs = (comoVideo && !soloUnFrame) ? await resolverArgsVsync(ffmpegPath) : [];
-            const args = (comoVideo && !soloUnFrame)
-                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', vf.replace('lanczos', 'bilinear') + ',fps=8', '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', '6', '-quality', '50', '-compression_level', '1', '-y', tmpOut]
-                : ['-threads', imgThreads, '-i', tmpIn, '-vf', vf, ...(soloUnFrame ? ['-vframes', '1'] : []), '-quality', '75', '-compression_level', '4', '-y', tmpOut];
-            await execFileAsync(ffmpegPath, args, { timeout: (comoVideo && !soloUnFrame) ? 60000 : 25000, windowsHide: true });
+            const esAnimado = comoVideo && !soloUnFrame;
+            const vsyncArgs = esAnimado ? await resolverArgsVsync(ffmpegPath) : [];
+            const p = perfil || { scale: 512, fps: STICKER_VIDEO_FPS, quality: 45, comp: 1 };
+            const maxSeg = String(opts.maxSegundos || STICKER_MAX_SEGUNDOS);
+            const args = esAnimado
+                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', `${vfBase(p.scale, 'bilinear')},fps=${p.fps}`, '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', maxSeg, '-quality', String(p.quality), '-compression_level', String(p.comp), '-y', tmpOut]
+                : ['-threads', imgThreads, '-i', tmpIn, '-vf', vfBase(512, 'lanczos'), ...(soloUnFrame ? ['-vframes', '1'] : []), '-quality', '75', '-compression_level', '4', '-y', tmpOut];
+            await execFileAsync(ffmpegPath, args, { timeout: esAnimado ? 90000 : 25000, windowsHide: true });
             return await fs.promises.readFile(tmpOut);
         } finally {
             await fs.promises.unlink(tmpIn).catch(() => { });
@@ -117,7 +136,7 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
     };
 
     if (esWebpAnimado(buffer)) {
-        // ffmpeg no decodifica WebP animado: conservar si ya es 512x512 o extraer primer frame
+        // ffmpeg no decodifica WebP animado: conservar si ya es válido o extraer primer frame
         try {
             return await agregarExifSticker(buffer);
         } catch (_) {
@@ -132,9 +151,27 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
     }
 
     const animado = isVideo || esBufferAnimado(buffer);
+    const maxBytes = Number(opts.maxBytes) > 0 ? Number(opts.maxBytes) : MAX_STICKER_WEBP_BYTES;
     try {
-        const webp = await intentar(animado, false);
-        return await agregarExifSticker(webp);
+        if (!animado) {
+            const webp = await intentar(false, false);
+            return await agregarExifSticker(webp);
+        }
+
+        const basePerfiles = (Number(opts.videoThreads) || 1) >= 2 ? PERFILES_VIDEO_PC : PERFILES_VIDEO_LOCAL;
+        let ultimo = null;
+        for (let i = 0; i < basePerfiles.length; i++) {
+            const perfil = (i === 0 && Number(opts.fps) > 0) ? { ...basePerfiles[i], fps: Number(opts.fps) } : basePerfiles[i];
+            const webp = await intentar(true, false, null, perfil);
+            const conExif = await agregarExifSticker(webp);
+            ultimo = conExif;
+            if (!conExif || conExif.length <= maxBytes || i === basePerfiles.length - 1) {
+                return conExif;
+            }
+            const next = basePerfiles[i + 1];
+            console.log(`[Sticker] WebP ${Math.round(conExif.length / 1024)}KB > ${Math.round(maxBytes / 1024)}KB, ajustando a ${next.scale}px/${next.fps}fps.`);
+        }
+        return ultimo;
     } catch (e) {
         try {
             console.warn(`[Sticker] Reintentando (${animado ? 'fallback estatico/alt' : 'animado'}):`, e.message);
@@ -193,10 +230,10 @@ async function procesarStickerCompleto({
         if (!necesitaAudio) return null;
         try {
             if (audioBuffer && audioBuffer.length) {
-                return await prepararAudioParaSticker(audioBuffer, ffmpeg, 10);
+                return await prepararAudioParaSticker(audioBuffer, ffmpeg, STICKER_MAX_SEGUNDOS);
             }
             if (esVideo) {
-                return await prepararAudioParaSticker(buffer, ffmpeg, 6);
+                return await prepararAudioParaSticker(buffer, ffmpeg, STICKER_MAX_SEGUNDOS);
             }
         } catch (e) {
             console.warn('[STICKER] No pude preparar el sonido:', e.message);
@@ -220,5 +257,8 @@ module.exports = {
     resolverFfmpeg,
     convertirAWebpBuffer,
     procesarStickerCompleto,
-    limpiarTemporalesStickers
+    limpiarTemporalesStickers,
+    STICKER_MAX_SEGUNDOS,
+    STICKER_VIDEO_FPS,
+    MAX_STICKER_WEBP_BYTES
 };
