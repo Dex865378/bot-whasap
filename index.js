@@ -849,6 +849,34 @@ function numJid(jid) {
 }
 
 
+// Caja de estado del dashboard: la usan / y /estado.json, para que la
+// pagina se actualice sin recargarse (el QR solo se reemplaza cuando
+// WhatsApp emite uno nuevo).
+function renderStatusBox() {
+    const statusHtml = botState.isConnected
+        ? '<p style="color:#22c55e;font-size:1.5em">✅ BOT ONLINE</p>'
+        : botState.pairingCode
+            ? `<p style="color:#94a3b8">CÓDIGO DE VINCULACIÓN:</p>
+                   <p style="font-size:3em;letter-spacing:10px;color:#facc15;font-weight:bold">${botState.pairingCode}</p>
+                   <p style="color:#64748b;font-size:0.8em">WhatsApp → Dispositivos vinculados → Vincular con número</p>`
+            : `<p style="color:#eab308;font-size:1.2em">⏳ ${botState.status}</p>`;
+
+    const qrHtml = (!botState.isConnected && botState.qrDataUrl)
+        ? `<div style="margin-top:16px">
+                   <p style="color:#94a3b8;margin-bottom:8px">QR DE VINCULACION:</p>
+                   <img src="${botState.qrDataUrl}" alt="QR WhatsApp" style="background:#fff;padding:10px;border-radius:10px;max-width:280px;width:100%;display:block;margin:0 auto">
+                   <p style="color:#64748b;font-size:0.8em;margin-top:8px">WhatsApp -> Dispositivos vinculados -> Vincular dispositivo</p>
+                   <p style="color:#475569;font-size:0.75em;margin-top:4px">Se renueva solo cada ~20 s (lo exige WhatsApp).</p>
+               </div>`
+        : '';
+
+    return {
+        html: statusHtml + qrHtml,
+        connected: botState.isConnected,
+        sig: botState.isConnected ? 'on' : `${botState.qrAt}|${botState.pairingCode || ''}`
+    };
+}
+
 function dashboardHandler(req, res) {
     const url = new URL(req.url || '/', 'http://localhost');
     const sendJson = (code, obj) => {
@@ -857,51 +885,80 @@ function dashboardHandler(req, res) {
     };
 
     if (url.pathname === '/' && req.method === 'GET') {
+        const box = renderStatusBox();
         const up = Math.floor((Date.now() - botState.startTime) / 1000);
         const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60), s = up % 60;
         const dbBadge = db.isConnected()
             ? '<span style="background:#166534;color:#4ade80;padding:2px 8px;border-radius:10px">TURSO ✅</span>'
             : '<span style="background:#7f1d1d;color:#fca5a5;padding:2px 8px;border-radius:10px">LOCAL 📁</span>';
-        const statusHtml = botState.isConnected
-            ? '<p style="color:#22c55e;font-size:1.5em">✅ BOT ONLINE</p>'
-            : botState.pairingCode
-                ? `<p style="color:#94a3b8">CÓDIGO DE VINCULACIÓN:</p>
-                   <p style="font-size:3em;letter-spacing:10px;color:#facc15;font-weight:bold">${botState.pairingCode}</p>
-                   <p style="color:#64748b;font-size:0.8em">WhatsApp → Dispositivos vinculados → Vincular con número</p>`
-                : `<p style="color:#eab308;font-size:1.2em">⏳ ${botState.status}</p>`;
-
-        const qrHtml = (!botState.isConnected && botState.qrDataUrl)
-            ? `<div style="margin-top:16px">
-                   <p style="color:#94a3b8;margin-bottom:8px">QR DE VINCULACION:</p>
-                   <img src="${botState.qrDataUrl}" alt="QR WhatsApp" style="background:#fff;padding:10px;border-radius:10px;max-width:260px;width:100%;display:block;margin:0 auto">
-                   <p style="color:#64748b;font-size:0.8em;margin-top:8px">WhatsApp -> Dispositivos vinculados -> Vincular dispositivo</p>
-               </div>`
-            : '';
 
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Diky Bot</title>
-    <meta http-equiv="refresh" content="5"><style>
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Diky Bot</title><style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh}
     .c{background:#1e293b;padding:40px;border-radius:20px;border:1px solid #334155;max-width:500px;width:90%;text-align:center}
     h1{color:#38bdf8;margin-bottom:20px}
-    .sb{background:#0f172a;padding:25px;border-radius:15px;margin:15px 0;border:2px solid ${botState.isConnected ? '#22c55e' : '#eab308'}}
+    .sb{background:#0f172a;padding:25px;border-radius:15px;margin:15px 0;border:2px solid ${box.connected ? '#22c55e' : '#eab308'}}
     .st{text-align:left;margin-top:20px;font-size:0.9em;color:#94a3b8}
     .st p{padding:5px 0;border-bottom:1px solid #334155}
     .st b{color:#e2e8f0}
     </style></head><body><div class="c">
     <h1>😺 Diky Bot V3</h1>
-    <div class="sb">${statusHtml}${qrHtml}</div>
+    <div class="sb" id="box">${box.html}</div>
     <div class="st">
-        <p>⏱️ <b>Uptime:</b> ${h}h ${m}m ${s}s</p>
-        <p>📨 <b>Mensajes:</b> ${botState.msgCount}</p>
-        <p>☁️ <b>DB:</b> ${dbBadge}</p>
-        <p>🔧 <b>Admin:</b> ${ADMIN_NUM || '⚠️'}</p>
-        <p><b>Ultimo error:</b> ${botState.lastDisconnectCode || '-'} ${botState.lastDisconnectReason || ''}</p>
-    </div></div></body></html>`);
+        <p>⏱️ <b>Uptime:</b> <span id="uptime">${h}h ${m}m ${s}s</span></p>
+        <p>📨 <b>Mensajes:</b> <span id="msgs">${botState.msgCount}</span></p>
+        <p>☁️ <b>DB:</b> <span id="db">${dbBadge}</span></p>
+        <p>🔧 <b>Admin:</b> <span id="admin">${ADMIN_NUM || '⚠️'}</span></p>
+        <p><b>Ultimo error:</b> <span id="err">${botState.lastDisconnectCode || '-'} ${botState.lastDisconnectReason || ''}</span></p>
+    </div></div>
+    <script>
+    (function () {
+        var box = document.getElementById('box');
+        var lastSig = ${JSON.stringify(box.sig)};
+        function fmt(total) {
+            var h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+            return h + 'h ' + m + 'm ' + s + 's';
+        }
+        function pintar(d) {
+            if (d.sig !== lastSig) { box.innerHTML = d.html; lastSig = d.sig; }
+            box.style.borderColor = d.connected ? '#22c55e' : '#eab308';
+            document.getElementById('uptime').textContent = fmt(d.uptime);
+            document.getElementById('msgs').textContent = d.msgs;
+            document.getElementById('db').innerHTML = d.db;
+            document.getElementById('admin').textContent = d.admin;
+            document.getElementById('err').textContent = d.err;
+        }
+        function tick() {
+            fetch('/estado.json', { cache: 'no-store' }).then(function (r) {
+                return r.ok ? r.json() : null;
+            }).then(function (d) {
+                if (d) pintar(d);
+            }).catch(function () { });
+        }
+        // Sin recargar la pagina: el QR se reemplaza solo cuando WhatsApp lo renueva.
+        setInterval(tick, 5000);
+    })();
+    </script></body></html>`);
         return;
     }
 
+    if (url.pathname === '/estado.json' && req.method === 'GET') {
+        const box = renderStatusBox();
+        sendJson(200, {
+            html: box.html,
+            sig: box.sig,
+            connected: box.connected,
+            uptime: Math.floor((Date.now() - botState.startTime) / 1000),
+            msgs: botState.msgCount,
+            db: db.isConnected()
+                ? '<span style="background:#166534;color:#4ade80;padding:2px 8px;border-radius:10px">TURSO ✅</span>'
+                : '<span style="background:#7f1d1d;color:#fca5a5;padding:2px 8px;border-radius:10px">LOCAL 📁</span>',
+            admin: ADMIN_NUM || '⚠️',
+            err: `${botState.lastDisconnectCode || '-'} ${botState.lastDisconnectReason || ''}`.trim()
+        });
+        return;
+    }
     if (url.pathname === '/health' && req.method === 'GET') {
         const mem = process.memoryUsage();
         const queues = [...colaSalida.entries()].map(([chatId, state]) => ({
