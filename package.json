@@ -22,7 +22,9 @@
     "node-webpmux": "^3.2.1",
     "pdfkit": "^0.19.1",
     "pino": "^9.0.0",
-    "qrcode": "^1.5.3"
+    "protobufjs": "^7.6.6",
+    "qrcode": "^1.5.3",
+    "ws": "^8.23.0"
   },
   "engines": {
     "node": ">=20.0.0"
