@@ -326,6 +326,18 @@ async function ejecutarSticker(sock, msg, extra = {}) {
         assert.strictEqual(await obtenerStickerCache(clave, {}), null, 'no debe guardar un sticker mudo como si tuviera audio');
     });
 
+    await probar('rechaza URLs de media vencidas y acepta las vigentes', async () => {
+        const vencido = mensajeSticker();
+        vencido.url = 'https://mmg.whatsapp.net/d/f/sticker?oe=00000000';
+        assert.strictEqual(esStickerCacheValido(vencido, true), false, 'oe vencido debe rechazarse');
+        const vigente = mensajeSticker();
+        vigente.url = 'https://mmg.whatsapp.net/d/f/sticker?oe=' + Math.floor(Date.now() / 1000 + 3600).toString(16);
+        assert.strictEqual(esStickerCacheValido(vigente, true), true, 'oe futuro debe aceptarse');
+        const audioVencido = mensajeSticker();
+        audioVencido.audioMessage.url = 'https://mmg.whatsapp.net/d/f/audio?oe=00000000';
+        assert.strictEqual(esStickerCacheValido(audioVencido, true), false, 'audio vencido debe rechazarse');
+    });
+
     await probar('cache viejo inválido no se devuelve', async () => {
         limpiarCacheMemoriaStickers();
         const clave = 'invalida';

@@ -96,14 +96,27 @@ function normalizarSticker(stickerMsg) {
     return copia;
 }
 
+// Las URLs de WhatsApp llevan un `oe` (expiración en hex). Si ya venció, el
+// receptor no podría descargar el media aunque el relay acepte el mensaje.
+function urlVigente(valor) {
+    if (!valor || typeof valor !== 'string') return true;
+    const m = /[?&]oe=([0-9a-f]+)/i.exec(valor);
+    if (!m) return true;
+    const expira = parseInt(m[1], 16);
+    if (!Number.isFinite(expira)) return true;
+    return expira * 1000 > Date.now() + 60000;
+}
+
 function esStickerCacheValido(stickerMsg, conAudio = !!stickerMsg?.audioMessage) {
     if (!stickerMsg || (!stickerMsg.url && !stickerMsg.directPath)) return false;
+    if (!urlVigente(stickerMsg.url) || !urlVigente(stickerMsg.directPath)) return false;
     if (!stickerMsg.mediaKey || !stickerMsg.fileSha256 || !stickerMsg.fileEncSha256) return false;
     if (!(numero(stickerMsg.fileLength) > 0)) return false;
 
     const audio = stickerMsg.audioMessage;
     if (conAudio) {
         if (!audio || (!audio.url && !audio.directPath)) return false;
+        if (!urlVigente(audio.url) || !urlVigente(audio.directPath)) return false;
         if (!audio.mediaKey || !audio.fileSha256 || !audio.fileEncSha256) return false;
         if (!(numero(audio.fileLength) > 0)) return false;
         if (audio.ptt !== true) return false;

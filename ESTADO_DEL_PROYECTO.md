@@ -40,7 +40,7 @@ Este documento es la BIBLIA del proyecto. TODO asistente DEBE leerlo PRIMERO ant
 - `!s` calcula una clave con el `fileSha256` de la imagen/video antes de descargar. Si ya existe, reenvía el sticker por `relayMessage` sin volver a descargar, convertir con FFmpeg ni subir a WhatsApp.
 - La clave incluye el tipo de media y el audio citado: la misma imagen con otro audio se procesa de nuevo. Un video con audio y el mismo video mudo no comparten entrada.
 - Se guarda solo el "recibo" de subida (`url`, `directPath`, `mediaKey`, hashes, `waveform`, etc.), no el WebP completo: ~300-500 bytes por entrada, máximo 500 en RAM y 500 en Turso (`stickers_cache`).
-- Si el sticker esperaba audio y el audio falló, NO se cachea el sticker mudo. Si el reenvío falla, se borra la entrada y se regenera normalmente.
+- Si el sticker esperaba audio y el audio falló, NO se cachea el sticker mudo. Si el reenvío falla o la URL firmada (`oe`) venció, se borra/descarta la entrada y se regenera normalmente.
 - `/health` expone `stickersCache` (`ram`, `hits`, `misses`, `saved`, `errors`).
 
 ## 🛠️ ARQUITECTURA TÉCNICA (MODULAR V3)
