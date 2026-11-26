@@ -220,3 +220,9 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Diagnóstico**: `/health` ahora trae `stickerGate { userHits, notices, adminSkip }`.
 - **Ojo al probar**: los números de `NUMERO_ADMIN` no pasan por el candado (se cuentan en `adminSkip`); con el número del dueño el aviso no sale por diseño.
 - **Test**: `npm run test-anti-ban` exige que el chequeo por usuario quede antes del global (falla con el orden viejo).
+### Baileys rc14 + estado de restricción 463 (v11.5.5, 2026-11-26)
+- **Upgrade**: `@whiskeysockets/baileys` 7.0.0-rc.9 → 7.0.0-rc14 (la última en npm ese día). La API que usa el bot (`makeWASocket`, `prepareWAMessageMedia`, `getWAUploadToServer`, `proto`, `downloadMediaMessage`, `getMediaKeys`, `Browsers`) sigue existiendo; smoke, anti-ban y sticker-audio pasan.
+- **Por qué**: rc14 trae manejo nativo del **Trusted Contact token** y del **reachout timelock (error 463)**: pide/renueva el `tctoken`, lo adjunta en mensajes 1:1 y reemite el token cuando WhatsApp responde 463. rc9 solo guardaba el token que llegaba; nunca lo pedía.
+- **Nuevo**: `utils/reachout.js` (`esError463`, `normalizarReachout`). El bot consulta `fetchAccountReachoutTimelock()` al conectar y cada 15 min, y expone `reachout { restringido, tipo, expiraEn, consultadoEn, errores, bloqueos463 }` en `/health`.
+- **Cola**: un envío que falle con 463 ya no cae en el reintento genérico: se cuenta en `reachout.bloqueos463`, se marca el chat como lento y se descarta una sola vez (reintentar alarga la restricción).
+- **Cómo se probó**: worktree aislado en `HEAD` + estos cambios (el checkout principal tenía trabajo en curso de otro cambio sin commitear). `npm test`, `npm run test-anti-ban` y `npm run test-stickers` verdes; bridge WASM de rc14 ejecutado (`md5` real) para confirmar que carga.

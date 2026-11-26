@@ -29,6 +29,7 @@ const { useTursoAuthState, clasificarDesconexionAuth } = require('./turso-auth')
 const { agregarExifSticker } = require('./utils/stickerExif');
 const { StickerPool } = require('./utils/stickerPool');
 const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto, limpiarTemporalesStickers } = require('./utils/stickerProcessor');
+const { esError463, normalizarReachout } = require('./utils/reachout');
 const handler = require('./commandHandler');
 const { handleGameResponse } = require('./gameResponder');
 const { handleMangaSession } = require('./mangaResponder');
@@ -328,8 +329,15 @@ async function procesarColaSalida(sock, chatId) {
                 marcarChatLento(chatId);
                 console.warn(`[COLA TIMEOUT] Chat ${chatId}: envio tardó mas de ${SEND_MESSAGE_TIMEOUT_MS}ms`);
             }
-            // Si es rate-limit, reintentamos 1 vez después de 1 segundo
-            if (e?.data === 429 || e?.message?.includes('rate-overlimit')) {
+            // 🚦 463 = cuenta restringida o falta el token de contacto (tctoken).
+            // Baileys rc14 ya reemite el token por su cuenta; reintentar aquí
+            // solo alarga la restricción, así que se descarta una vez.
+            if (esError463(e)) {
+                reachout.bloqueos463++;
+                marcarChatLento(chatId);
+                console.warn(`[COLA 463] Chat ${chatId}: WhatsApp restringió el mensaje (reachout timelock). No se reintenta.`);
+                reject(e);
+            } else if (e?.data === 429 || e?.message?.includes('rate-overlimit')) {
                 await new Promise(r => setTimeout(r, 1000));
                 try {
                     let result;
@@ -669,6 +677,47 @@ const botState = {
 botState.actividadPendiente = actividadBatch;
 botState.actividadUltima = actividadUltima;
 
+// 🚦 RESTRICCIÓN DE CUENTA (reachout timelock / error 463)
+// WhatsApp limita la cuenta cuando su actividad parece spam/automatizada:
+// no deja iniciar chats con desconocidos ni unirse a grupos nuevos. Se consulta
+// al conectar y cada 15 min; /health lo muestra. NO se bloquean los envíos:
+// en grupos y chats ya existentes se sigue pudiendo escribir.
+const reachout = {
+    restringido: null,   // null = todavía sin dato
+    tipo: null,
+    expiraEn: null,
+    consultadoEn: 0,
+    errores: 0,
+    bloqueos463: 0,
+    avisado: false,
+};
+
+function aplicarReachout(raw) {
+    const n = normalizarReachout(raw);
+    const antes = reachout.restringido;
+    reachout.restringido = n.restringido;
+    reachout.tipo = n.tipo;
+    reachout.expiraEn = n.expiraEn;
+    reachout.consultadoEn = Date.now();
+    if (n.restringido && !antes && !reachout.avisado) {
+        reachout.avisado = true;
+        const horas = n.segundosRestantes ? Math.ceil(n.segundosRestantes / 3600) : null;
+        console.warn(`🚦 [REACHOUT] Cuenta restringida${n.tipo ? ` (${n.tipo})` : ''}${horas ? `, termina en ~${horas}h` : ''}. No se pueden iniciar chats nuevos ni unirse a grupos.`);
+    }
+    if (!n.restringido) reachout.avisado = false;
+}
+
+async function actualizarReachout(sock) {
+    if (!sock || typeof sock.fetchAccountReachoutTimelock !== 'function') return;
+    try {
+        const estado = await sock.fetchAccountReachoutTimelock();
+        aplicarReachout(estado);
+    } catch (e) {
+        reachout.errores++;
+        if (VERBOSE_LOGS) console.warn('[REACHOUT] No se pudo consultar el estado:', e.message);
+    }
+}
+
 // 📊 MÉTRICAS DE LATENCIA (para /health)
 // Guarda las últimas 200 ejecuciones de comandos. Sirve para comprobar en
 // producción si el bot realmente responde más rápido y detectar regresiones
@@ -997,6 +1046,7 @@ function dashboardHandler(req, res) {
             latencia: resumenLatencias(),
             stickersPool: { ...stickerPool.getStats(), cacheCleanups: _stickerCleanups },
             stickerGate: { ...stickerGate },
+            reachout: { ...reachout },
             inFlightMsgs: mensajesEnVuelo,
             groupMetaCached: groupMetaCache.size,
             groupMetaStats,
@@ -1244,6 +1294,7 @@ async function startBot() {
     // --- CONEXIÓN ---
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
+        if (update.reachoutTimeLock) aplicarReachout(update.reachoutTimeLock);
 
         if (qr) {
             try {
@@ -1314,6 +1365,10 @@ async function startBot() {
             botState.seConectoAlgunaVez = true; // Marcar que SÍ logró conectarse
             errores401 = 0; // Reset del contador de errores al conectar exitosamente
             errores403 = 0;
+
+            // 🚦 ¿La cuenta está restringida ahora mismo? (solo informa)
+            actualizarReachout(sock).catch(() => { });
+            onceInterval('reachout', () => { actualizarReachout(sock).catch(() => { }); }, 15 * 60 * 1000);
 
             // 🔄 Cargar comandos explícitamente (evita problemas de carga circular)
             handler.loadCommands();

@@ -302,6 +302,56 @@ const assert = require('assert');
         assert.strictEqual(typeof mod.execute, 'function');
     });
 
+    // ── 463 / reachout timelock (Baileys rc14) ──
+    const { esError463, normalizarReachout } = require('../utils/reachout');
+
+    await probar('esError463 detecta 463 en data, output.statusCode y mensaje', async () => {
+        assert.strictEqual(esError463({ data: 463 }), true);
+        assert.strictEqual(esError463({ output: { statusCode: 463 } }), true);
+        assert.strictEqual(esError463(new Error('reachout timelock: account restricted')), true);
+    });
+
+    await probar('esError463 NO confunde 429 ni ids de mensaje con 4630', async () => {
+        assert.strictEqual(esError463({ data: 429 }), false);
+        assert.strictEqual(esError463(new Error('sendMessage timeout')), false);
+        assert.strictEqual(esError463(new Error('msg 146301234 failed')), false);
+        assert.strictEqual(esError463(null), false);
+    });
+
+    await probar('normalizarReachout: activo trae tipo y fecha', async () => {
+        const fin = new Date(Date.now() + 3600 * 1000);
+        const r = normalizarReachout({ isActive: true, enforcementType: 'DEFAULT', timeEnforcementEnds: fin });
+        assert.strictEqual(r.restringido, true);
+        assert.strictEqual(r.tipo, null, 'DEFAULT no es una restricción real');
+        assert.strictEqual(r.expiraEn, fin.getTime());
+        assert.ok(r.segundosRestantes > 3500, 'debe calcular segundos restantes');
+    });
+
+    await probar('normalizarReachout: inactivo o vacío no restringe', async () => {
+        const r = normalizarReachout({ isActive: false, enforcementType: 'DEFAULT' });
+        assert.strictEqual(r.restringido, false);
+        assert.strictEqual(r.expiraEn, null);
+        assert.strictEqual(normalizarReachout(undefined).restringido, false);
+    });
+
+    await probar('el índice consulta el reachout y lo expone en /health', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        assert.ok(src.includes('fetchAccountReachoutTimelock'), 'debe consultar el estado de restricción');
+        assert.ok(src.includes('reachout: { ...reachout }'), '/health debe exponer el estado');
+        assert.ok(src.includes("sock.ev.on('connection.update'") && src.includes('reachoutTimeLock'),
+            'debe escuchar reachoutTimeLock en connection.update');
+    });
+
+    await probar('la cola detecta el 463 antes de reintentar cualquier 429', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        const fnStart = src.indexOf('async function procesarColaSalida');
+        const fnEnd = src.indexOf('\nfunction ', fnStart + 1);
+        const fnBody = src.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 4000);
+        assert.ok(fnBody.includes('esError463(e)'), 'la cola debe detectar 463');
+        assert.ok(fnBody.indexOf('esError463(e)') < fnBody.indexOf("rate-overlimit"),
+            'el 463 debe revisarse antes del reintento de 429');
+    });
+
     console.log(fallos === 0 ? '\n🎉 TEST ANTI-BAN OK' : `\n💥 TEST ANTI-BAN: ${fallos} fallo(s)`);
     process.exit(fallos === 0 ? 0 : 1);
 })().catch(e => { console.error(e); process.exit(1); });
