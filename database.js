@@ -51,6 +51,8 @@ async function crearTablas() {
         `CREATE TABLE IF NOT EXISTS afk (user_id TEXT PRIMARY KEY, motivo TEXT DEFAULT '', ts BIGINT)`,
         `CREATE TABLE IF NOT EXISTS actividad (chat_id TEXT NOT NULL, user_id TEXT NOT NULL, total INTEGER DEFAULT 0, ultima_actividad BIGINT DEFAULT 0, PRIMARY KEY (chat_id, user_id))`,
         `CREATE TABLE IF NOT EXISTS stickers_usuario (user_id TEXT NOT NULL, nombre TEXT NOT NULL, sticker BLOB NOT NULL, created_at BIGINT, PRIMARY KEY (user_id, nombre))`,
+        `CREATE TABLE IF NOT EXISTS stickers_cache (clave TEXT PRIMARY KEY, sticker TEXT NOT NULL, created_at INTEGER NOT NULL, last_used INTEGER NOT NULL, hits INTEGER DEFAULT 0)`,
+        `CREATE INDEX IF NOT EXISTS idx_stickers_cache_last_used ON stickers_cache(last_used)`,
         `CREATE TABLE IF NOT EXISTS reglas_grupo (chat_id TEXT PRIMARY KEY, texto TEXT NOT NULL, puesto_por TEXT, updated_at BIGINT)`,
         `CREATE TABLE IF NOT EXISTS recordatorios (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_id TEXT, texto TEXT, execute_at BIGINT, creado BIGINT)`,
         `CREATE TABLE IF NOT EXISTS records (juego TEXT NOT NULL, user_id TEXT NOT NULL, mejor INTEGER NOT NULL, updated_at BIGINT, PRIMARY KEY (juego, user_id))`,
@@ -1280,6 +1282,58 @@ async function borrarSticker(userId, nombre) {
         return (rs.rowsAffected || 0) > 0;
     } catch (e) { return false; }
 }
+// --- Cache de stickers ya subidos (reenvío sin volver a subir) ---
+async function getStickerCache(clave) {
+    if (!connected) await init();
+    if (!connected || !dbClient) return null;
+    try {
+        const rs = await dbClient.execute({
+            sql: 'SELECT sticker FROM stickers_cache WHERE clave = ? LIMIT 1',
+            args: [clave]
+        });
+        const fila = rs.rows && rs.rows[0];
+        if (!fila || !fila.sticker) return null;
+        // El LRU de la DB se actualiza sin bloquear el envío.
+        dbClient.execute({
+            sql: 'UPDATE stickers_cache SET last_used = ?, hits = hits + 1 WHERE clave = ?',
+            args: [Date.now(), clave]
+        }).catch(() => { });
+        return Buffer.isBuffer(fila.sticker) ? fila.sticker.toString('utf8') : String(fila.sticker);
+    } catch (e) {
+        console.warn('[DB] Error getStickerCache:', e.message);
+        return null;
+    }
+}
+
+async function saveStickerCache(clave, stickerJson, max = 500) {
+    if (!connected) await init();
+    if (!connected || !dbClient) return false;
+    try {
+        const ahora = Date.now();
+        await dbClient.execute({
+            sql: 'INSERT INTO stickers_cache (clave, sticker, created_at, last_used, hits) VALUES (?, ?, ?, ?, 0) ON CONFLICT(clave) DO UPDATE SET sticker = excluded.sticker, last_used = excluded.last_used',
+            args: [clave, stickerJson, ahora, ahora]
+        });
+        const tope = Math.max(1, Number(max) || 500);
+        await dbClient.execute({
+            sql: 'DELETE FROM stickers_cache WHERE clave NOT IN (SELECT clave FROM stickers_cache ORDER BY last_used DESC LIMIT ?)',
+            args: [tope]
+        });
+        return true;
+    } catch (e) {
+        console.warn('[DB] Error saveStickerCache:', e.message);
+        return false;
+    }
+}
+
+async function deleteStickerCache(clave) {
+    if (!connected) await init();
+    if (!connected || !dbClient) return false;
+    try {
+        const rs = await dbClient.execute({ sql: 'DELETE FROM stickers_cache WHERE clave = ?', args: [clave] });
+        return (rs.rowsAffected || 0) > 0;
+    } catch (e) { return false; }
+}
 
 // --- Reglas del grupo (!setreglas / !reglas) ---
 async function setReglas(chatId, texto, puestoPor) {
@@ -1680,6 +1734,7 @@ module.exports = {
     setAFK, getAFK, clearAFK,
     sumarActividadBatch, topActivos, actividadPorChat, actividadDetalle, upsertSilenciado, silenciadosActivos, limpiarSilenciados,
     guardarSticker, obtenerSticker, misStickers, borrarSticker,
+    getStickerCache, saveStickerCache, deleteStickerCache,
     setReglas, getReglas, borrarReglas,
     latirInstancia, obtenerUrlServicio, instanciasActivas, apagarInstancia, limpiarInstanciasViejas,
     crearRecordatorio, misRecordatorios, borrarRecordatorio, recordatoriosVencidos,

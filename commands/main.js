@@ -8,6 +8,7 @@ const os = require('os');
 const { proto } = require('@whiskeysockets/baileys');
 const { esWebpAnimado, primerFrameWebp } = require('../utils/media');
 const { enviarStickerConSonido, enviarStickerPreSubido } = require('../utils/stickerSonido');
+const { construirClaveCache, obtenerStickerCache, guardarStickerCache, borrarStickerCache } = require('../utils/stickerCache');
 
 function serializarMediaProto(mediaObj, tipoClave) {
     try {
@@ -578,14 +579,46 @@ module.exports = {
                 }, { quoted: msg });
             };
 
+            const mediaClave = esVideo
+                ? ((media === msg.message?.documentMessage || media === citada?.documentMessage) ? 'documentMessage' : 'videoMessage')
+                : ((media === msg.message?.documentMessage || media === citada?.documentMessage) ? 'documentMessage' : 'imageMessage');
+            const claveCache = construirClaveCache({
+                media,
+                audio: audioCitado,
+                esVideo,
+                conAudio: necesitaAudio,
+                tipoMedia: mediaClave
+            });
+            const guardarCacheSticker = (stickerMsg, conAudio) => {
+                if (!claveCache || !stickerMsg) return;
+                // No se espera: un fallo de Turso nunca debe retrasar el envío.
+                guardarStickerCache(claveCache, stickerMsg, db, { conAudio })
+                    .catch(e => console.warn('[STICKER] No se pudo guardar cache:', e.message));
+            };
+
             try {
                 let stiker = null;
                 let audio = null;
 
+                // Cache hit: el sticker ya está subido a WhatsApp. Se reenvía
+                // por relay con la cita NUEVA, sin descargar ni convertir nada.
+                if (claveCache) {
+                    const cacheado = await obtenerStickerCache(claveCache, db, { conAudio: necesitaAudio });
+                    if (cacheado) {
+                        try {
+                            const envioCache = await enviarStickerPreSubido(sock, chatId, cacheado, msg);
+                            if (envioCache) {
+                                console.log(`[STICKER] Cache hit (${mediaClave}, audio=${necesitaAudio ? 'si' : 'no'}) -> relay directo.`);
+                                return;
+                            }
+                        } catch (eCache) {
+                            console.warn('[STICKER] Cache no reenviable, se regenera:', eCache.message);
+                        }
+                        await borrarStickerCache(claveCache, db);
+                    }
+                }
+
                 if (stickerPool) {
-                    const mediaClave = esVideo
-                        ? ((media === msg.message?.documentMessage || media === citada?.documentMessage) ? 'documentMessage' : 'videoMessage')
-                        : ((media === msg.message?.documentMessage || media === citada?.documentMessage) ? 'documentMessage' : 'imageMessage');
                     const mediaProtoBytes = serializarMediaProto(media, mediaClave);
                     const audioProtoBytes = (!esVideo && audioCitado)
                         ? serializarMediaProto(audioCitado, audioCitado === citada?.audioMessage ? 'audioMessage' : 'documentMessage')
@@ -618,6 +651,7 @@ module.exports = {
                     if (res.preuploadedStickerMsg) {
                         const envio = await enviarStickerPreSubido(sock, chatId, res.preuploadedStickerMsg, msg);
                         if (envio) {
+                            guardarCacheSticker(envio.message?.stickerMessage, necesitaAudio);
                             console.log(`[STICKER] Enviado via PC directo (Render solo relayMessage).`);
                             return;
                         }
@@ -663,11 +697,18 @@ module.exports = {
                 if (audio && audio.buffer && audio.buffer.length && audio.waveform && audio.waveform.length) {
                     const enviado = await enviarStickerConSonido(sock, chatId, stiker, audio, msg, FFMPEG_PATH);
                     if (enviado) {
+                        guardarCacheSticker(enviado.message?.stickerMessage, true);
                         console.log(`[STICKER] Enviado con sonido (${Math.round(audio.buffer.length / 1024)} KB, ${Math.round(audio.segundos || 0)}s, waveform: ${audio.waveform.length}B).`);
                         return;
                     }
                 }
-                return sock.sendMessage(chatId, { sticker: stiker }, { quoted: msg });
+                const enviadoSinSonido = await sock.sendMessage(chatId, { sticker: stiker }, { quoted: msg });
+                // Si se esperaba audio y falló, NO se cachea: guardar un sticker
+                // mudo bajo la clave con audio envenenaría los siguientes envíos.
+                if (!necesitaAudio) {
+                    guardarCacheSticker(enviadoSinSonido?.message?.stickerMessage, false);
+                }
+                return enviadoSinSonido;
             } catch (e) {
                 console.error('[STICKER] Error:', e.message);
                 return sock.sendMessage(chatId, { text: '❌ Error al crear sticker.' });

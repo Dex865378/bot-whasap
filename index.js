@@ -28,6 +28,7 @@ const db = require('./database');
 const { useTursoAuthState, clasificarDesconexionAuth } = require('./turso-auth');
 const { agregarExifSticker } = require('./utils/stickerExif');
 const { StickerPool } = require('./utils/stickerPool');
+const { getStats: getStickerCacheStats } = require('./utils/stickerCache');
 const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto, limpiarTemporalesStickers } = require('./utils/stickerProcessor');
 const { esError463, normalizarReachout } = require('./utils/reachout');
 const handler = require('./commandHandler');
@@ -1045,6 +1046,7 @@ function dashboardHandler(req, res) {
             },
             latencia: resumenLatencias(),
             stickersPool: { ...stickerPool.getStats(), cacheCleanups: _stickerCleanups },
+            stickersCache: getStickerCacheStats(),
             stickerGate: { ...stickerGate },
             reachout: { ...reachout },
             inFlightMsgs: mensajesEnVuelo,

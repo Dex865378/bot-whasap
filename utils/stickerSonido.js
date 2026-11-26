@@ -367,26 +367,67 @@ async function subirYArmarSticker({
     return stickerMsg;
 }
 
+function clonarValorSticker(valor) {
+    if (Buffer.isBuffer(valor)) return Buffer.from(valor);
+    if (valor instanceof Uint8Array) return Buffer.from(valor);
+    if (Array.isArray(valor)) return valor.map(clonarValorSticker);
+    if (valor && typeof valor === 'object') {
+        // Los Long de protobuf se pasan a number (fileLength, seconds, etc.).
+        if (typeof valor.toNumber === 'function') return valor.toNumber();
+        const copia = {};
+        for (const clave of Object.keys(valor)) copia[clave] = clonarValorSticker(valor[clave]);
+        return copia;
+    }
+    return valor;
+}
+
+function clonarStickerMsg(stickerMsg) {
+    if (!stickerMsg || typeof stickerMsg !== 'object') return null;
+    // No usar JSON.stringify directo: los objetos de protobuf tienen toJSON(),
+    // que descarta el campo 26 (audioMessage) porque el proto base no lo conoce.
+    try {
+        return clonarValorSticker(stickerMsg);
+    } catch (_) {
+        return null;
+    }
+}
+
 async function enviarStickerPreSubido(sock, jid, stickerMsgOrBytes, quoted) {
     if (!sock || !stickerMsgOrBytes) return null;
     parchearProtoSonido();
-    const stickerMsg = Buffer.isBuffer(stickerMsgOrBytes)
+    const decodificado = Buffer.isBuffer(stickerMsgOrBytes)
         ? proto.Message.StickerMessage.decode(stickerMsgOrBytes)
         : stickerMsgOrBytes;
+    // Copia profunda: el cache y el caller reutilizan este objeto. Si se manda
+    // el mismo sin clonar, la cita de un mensaje viejo se filtra al siguiente.
+    const stickerMsg = clonarStickerMsg(decodificado);
     if (!stickerMsg || (!stickerMsg.url && !stickerMsg.directPath)) return null;
+    delete stickerMsg.contextInfo;
+    stickerMsg.stickerSentTs = Date.now();
 
-    const savedAudio = stickerMsg.audioMessage || null;
-    const waMsg = generateWAMessageFromContent(jid, {
-        stickerMessage: {
-            ...stickerMsg,
-            ...(savedAudio ? { audioMessage: savedAudio } : {})
+    let savedAudio = stickerMsg.audioMessage || null;
+    if (savedAudio && !savedAudio.url && !savedAudio.directPath) savedAudio = null;
+    if (savedAudio) {
+        const audioCopia = clonarStickerMsg(savedAudio);
+        if (!audioCopia) savedAudio = null;
+        else {
+            savedAudio = audioCopia;
+            delete savedAudio.contextInfo;
         }
+    }
+    if (savedAudio) stickerMsg.audioMessage = savedAudio;
+    else delete stickerMsg.audioMessage;
+
+    const waMsg = generateWAMessageFromContent(jid, {
+        stickerMessage: stickerMsg
     }, {
         userJid: sock.user?.id,
         quoted: quoted || undefined
     });
 
     if (!waMsg?.message?.stickerMessage) return null;
+    // generateWAMessageFromContent usa el proto de Baileys, que no conoce el
+    // campo 26: se reengancha después de generar el mensaje.
     if (savedAudio) waMsg.message.stickerMessage.audioMessage = savedAudio;
 
     const enviarOnce = () => {

@@ -1,13 +1,14 @@
 {
   "name": "neko-manga-bot",
-  "version": "11.5.5",
+  "version": "11.6.0",
   "description": "Bot de WhatsApp para Mangas - Neko Engine v11.1 (Baileys + Turso)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "worker": "node worker-pc.js",
     "test": "node scripts/smoke-test.js",
-    "test-stickers": "node scripts/test-sticker-audio.js",
+    "test-stickers": "node scripts/test-sticker-audio.js && node scripts/test-sticker-cache.js",
+    "test-sticker-cache": "node scripts/test-sticker-cache.js",
     "test-anti-ban": "node scripts/test-anti-ban.js",
     "test-db": "node test-turso.js",
     "reset-session": "node scripts/reset-session.js"
