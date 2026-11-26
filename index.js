@@ -30,7 +30,7 @@ const { agregarExifSticker } = require('./utils/stickerExif');
 const { StickerPool } = require('./utils/stickerPool');
 const { getStats: getStickerCacheStats } = require('./utils/stickerCache');
 const { resolverFfmpeg, convertirAWebpBuffer, procesarStickerCompleto, limpiarTemporalesStickers } = require('./utils/stickerProcessor');
-const { esError463, normalizarReachout } = require('./utils/reachout');
+const { esError463, esActualizacion463, normalizarReachout } = require('./utils/reachout');
 const handler = require('./commandHandler');
 const { handleGameResponse } = require('./gameResponder');
 const { handleMangaSession } = require('./mangaResponder');
@@ -193,6 +193,18 @@ function limpiarCachesMemoria(ttlCooldownMs = 5 * 60 * 1000) {
     for (const [cid, b] of stickerGroupBudget.entries()) {
         if (ahoraGC - b.windowStart > 120000) { stickerGroupBudget.delete(cid); totalLimpiado++; }
     }
+    for (const [cid, until] of slowChats.entries()) {
+        if (until <= ahoraGC) { slowChats.delete(cid); totalLimpiado++; }
+    }
+    for (const [cid, ts] of adminFetchAt.entries()) {
+        if (ahoraGC - ts > ADMIN_FETCH_MIN_MS) { adminFetchAt.delete(cid); totalLimpiado++; }
+    }
+    while (botState.afkCache && botState.afkCache.size > 500) {
+        const oldestAfk = botState.afkCache.keys().next().value;
+        if (oldestAfk === undefined) break;
+        botState.afkCache.delete(oldestAfk);
+        totalLimpiado++;
+    }
     return totalLimpiado;
 }
 
@@ -275,6 +287,28 @@ function esChatLento(chatId) {
     if (until > Date.now()) return true;
     if (until) slowChats.delete(chatId);
     return false;
+}
+
+function crearSockProxy(sock, { queueSend = true, permitirReacciones = false } = {}) {
+    return new Proxy(sock, {
+        get(target, prop) {
+            if (prop === '_esColaProxy') return true;
+            if (prop === 'sendMessage') {
+                return (jid, content, opts) => {
+                    if (content && content.react && !permitirReacciones) {
+                        return Promise.resolve({ status: 'skipped_reaction' });
+                    }
+                    return queueSend
+                        ? enviarConCola(target, jid, content, opts)
+                        : sendMessageConTimeout(target, jid, content, opts);
+                };
+            }
+            if (prop === 'relayMessage') {
+                return (jid, message, opts) => enviarConCola(target, jid, { _relay: true, _relayMsg: message, _relayOpts: opts }, {});
+            }
+            return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
+        }
+    });
 }
 
 async function enviarConCola(sock, chatId, content, options) {
@@ -709,12 +743,12 @@ function aplicarReachout(raw) {
 }
 
 async function actualizarReachout(sock) {
-    if (!sock || typeof sock.fetchAccountReachoutTimelock !== 'function') return;
+    if (!botState.isConnected || !sock || typeof sock.fetchAccountReachoutTimelock !== 'function') return;
     try {
         const estado = await sock.fetchAccountReachoutTimelock();
         aplicarReachout(estado);
     } catch (e) {
-        reachout.errores++;
+        if (botState.isConnected) reachout.errores++;
         if (VERBOSE_LOGS) console.warn('[REACHOUT] No se pudo consultar el estado:', e.message);
     }
 }
@@ -1671,11 +1705,6 @@ async function startBot() {
 
             const tipo = getContentType(msg.message);
 
-            // Read receipt: marcar mensaje como leído antes de procesarlo (anti-ban)
-            if (msg.key?.id && chatId) {
-                sock.readMessages([msg.key]).catch(() => {});
-            }
-
             let texto = '';
             if (tipo === 'conversation') texto = msg.message.conversation || '';
             else if (tipo === 'extendedTextMessage') texto = msg.message.extendedTextMessage?.text || '';
@@ -1777,6 +1806,22 @@ async function startBot() {
                 groupMetaCache.delete(u.id);
                 botState.adminCache.delete(u.id);
             }
+        }
+    });
+
+    let last463RefreshAt = 0;
+    sock.ev.on('messages.update', (updates) => {
+        let hubo463 = false;
+        for (const u of updates || []) {
+            if (!esActualizacion463(u)) continue;
+            reachout.bloqueos463++;
+            hubo463 = true;
+            if (u.key?.remoteJid) marcarChatLento(u.key.remoteJid);
+        }
+        if (hubo463 && Date.now() - last463RefreshAt > 60000) {
+            last463RefreshAt = Date.now();
+            console.warn('🚦 [ACK 463] WhatsApp rechazó un envío (reachout timelock / tctoken).');
+            actualizarReachout(sock).catch(() => { });
         }
     });
 
@@ -2025,13 +2070,20 @@ async function procesarMensaje(sock, msg) {
         }
 
         // --- LÓGICA DE RESPUESTA A JUEGOS Y SESIONES INTERACTIVAS ---
+        const marcarLeido = () => {
+            if (!msg.key?.fromMe && msg.key?.id && chatId) {
+                sock.readMessages([msg.key]).catch(() => {});
+            }
+        };
         if (botState.juegos[chatId]) {
+            if (participaEnJuego) marcarLeido();
             const context = { chatId, sender, cmd, txt, quotedMsgId, botState, db, isCommand };
             const wasGameResponse = await handleGameResponse(sock, msg, context);
             if (wasGameResponse) return;
         }
 
         if (tieneMangaSesion) {
+            marcarLeido();
             const context = {
                 chatId, sender, cmd, txt, msg, botState, db, isCommand, isGroup, isAdmin, isGlobalAdmin,
                 pushName, downloadMediaMessage, traducirConCache, FFMPEG_PATH, ADMIN_NUM,
@@ -2042,6 +2094,7 @@ async function procesarMensaje(sock, msg) {
         }
 
         if (tieneNovelaSesion) {
+            marcarLeido();
             const context = {
                 chatId, sender, cmd, txt, msg, botState, db, isCommand, isGroup, isAdmin, isGlobalAdmin,
                 pushName, quotedMsgId, quotedParticipant, msgType
@@ -2110,18 +2163,9 @@ async function procesarMensaje(sock, msg) {
             ];
 
             if (FAST_COMMANDS.has(start) && (handler.commands.has(start) || comandosValidos.includes(start))) {
+                marcarLeido();
                 const args = txt.split(' ').slice(1);
-                const sockProxy = new Proxy(sock, {
-                    get(target, prop) {
-                        if (prop === 'sendMessage') {
-                            return (jid, content, opts) => sendMessageConTimeout(target, jid, content, opts);
-                        }
-                        if (prop === 'relayMessage') {
-                            return (jid, message, opts) => enviarConCola(target, jid, { _relay: true, _relayMsg: message, _relayOpts: opts }, {});
-                        }
-                        return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
-                    }
-                });
+                const sockProxy = crearSockProxy(sock, { queueSend: false, permitirReacciones: false });
                 const extras = {
                     start, cmd, txt, args, sender, pushName, isGroup, isAdmin, isGlobalAdmin,
                     botState, db, delay, FFMPEG_PATH, ADMIN_NUM,
@@ -2153,7 +2197,7 @@ async function procesarMensaje(sock, msg) {
                         if (verificarCooldown(sender, '!s-wait-notice', 15000) === 0) {
                             stickerGate.notices++;
                             const segTotal = Math.round(STICKER_USER_COOLDOWN_MS / 1000);
-                            sock.sendMessage(chatId, {
+                            enviarConCola(sock, chatId, {
                                 text: `⏳ *Espera ${stickerWait} s* para otro sticker.\n`
                                     + `Va 1 cada ${segTotal} s por persona, si no WhatsApp nos frena el número 😅`
                             }, { quoted: msg }).catch(() => { });
@@ -2172,7 +2216,7 @@ async function procesarMensaje(sock, msg) {
                         }
                         if (budget.count >= STICKER_GROUP_PER_MIN) {
                             if (verificarCooldown(chatId, 'sticker-limit-notice', 30000) === 0) {
-                                sock.sendMessage(chatId, { text: '⏳ *Límite de stickers por minuto alcanzado.* Espera unos segundos.' }, { quoted: msg }).catch(() => {});
+                                enviarConCola(sock, chatId, { text: '⏳ *Límite de stickers por minuto alcanzado.* Espera unos segundos.' }, { quoted: msg }).catch(() => {});
                             }
                             return;
                         }
@@ -2189,7 +2233,6 @@ async function procesarMensaje(sock, msg) {
             if (cooldownMs > 0) {
                 const globalWait = verificarCooldown(sender, 'global', cooldownMs);
                 if (globalWait > 0) {
-                    sock.sendMessage(chatId, { react: { text: '⏳', key: msg.key } }).catch(() => {});
                     return;
                 }
             }
@@ -2294,6 +2337,8 @@ async function procesarMensaje(sock, msg) {
                     console.log(`📡 Admin Cmd: ${cmd}`);
                 }
 
+                marcarLeido();
+
                 // 4. Reacción inmediata
                 let emoji = '⚡';
 
@@ -2380,19 +2425,9 @@ async function procesarMensaje(sock, msg) {
                 // 5. EJECUTAR COMANDO MODULAR
                 const args = txt.split(' ').slice(1);
 
-                // Proxy de sock: intercepta sendMessage y lo pasa por la cola de salida
-                // Esto hace que TODOS los módulos usen la cola automáticamente sin cambiar nada en ellos.
-                const sockProxy = new Proxy(sock, {
-                    get(target, prop) {
-                        if (prop === 'sendMessage') {
-                            return (jid, content, opts) => enviarConCola(target, jid, content, opts);
-                        }
-                        if (prop === 'relayMessage') {
-                            return (jid, message, opts) => enviarConCola(target, jid, { _relay: true, _relayMsg: message, _relayOpts: opts }, {});
-                        }
-                        return typeof target[prop] === 'function' ? target[prop].bind(target) : target[prop];
-                    }
-                });
+                // Proxy de sock: intercepta sendMessage y relayMessage para pasar por cola
+                // y suprimir reacciones en chats/DMs donde estén desactivadas.
+                const sockProxy = crearSockProxy(sock, { queueSend: true, permitirReacciones: reaccionesGrupoActivas });
 
                 const extras = {
                     start, cmd, txt, args, sender, pushName, isGroup, isAdmin, isGlobalAdmin,
@@ -2427,8 +2462,8 @@ async function procesarMensaje(sock, msg) {
                     const mExecuted = await handler.handleCommand(start, sockProxy, chatId, msg, args, extras);
                     const cmdDuration = Date.now() - cmdStartTime;
                     registrarLatencia(start, cmdDuration);
-                    // Log comandos lentos (>1s) para identificar bottlenecks
-                    if (cmdDuration > 1000) {
+                    // Log comandos lentos (>15s; incluye composing 1.5-6.8s + cola)
+                    if (cmdDuration > 15000) {
                         console.log(`[SLOW CMD] ${start}: ${cmdDuration}ms - posible bottleneck`);
                     }
                     if (mExecuted) return;
@@ -2444,7 +2479,7 @@ async function procesarMensaje(sock, msg) {
                 // ignorado. Se avisa una vez cada 15s por usuario, y solo en
                 // grupos donde el bot está activado (para no meter ruido).
                 if (verificarCooldown(sender, 'cmd-desconocido', 15000) === 0) {
-                    sock.sendMessage(chatId, {
+                    enviarConCola(sock, chatId, {
                         text: `🤔 No conozco el comando *${start}*.\n\n👉 Escribí *!menu* para ver la lista completa.`
                     }, { quoted: msg }).catch(() => { });
                 }

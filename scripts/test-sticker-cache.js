@@ -338,12 +338,96 @@ async function ejecutarSticker(sock, msg, extra = {}) {
         assert.strictEqual(esStickerCacheValido(audioVencido, true), false, 'audio vencido debe rechazarse');
     });
 
-    await probar('cache viejo inválido no se devuelve', async () => {
+    await probar('cache viejo inválido no se devuelve y limpia la DB', async () => {
         limpiarCacheMemoriaStickers();
         const clave = 'invalida';
         const guardado = await guardarStickerCache(clave, { url: 'https://x', directPath: '/x' }, {});
         assert.strictEqual(guardado, false, 'no debe guardar un sticker sin metadatos de subida');
         assert.strictEqual(await obtenerStickerCache(clave, {}), null);
+
+        // Entrada vencida ya presente en DB: debe borrar la fila zombie en Turso
+        const borrados = [];
+        let dbReads = 0;
+        const vencido = mensajeSticker();
+        vencido.url = 'https://mmg.whatsapp.net/d/f/sticker?oe=00000000';
+        const claveExp = 'v1:expirada:test';
+        const expJson = JSON.stringify(vencido, require('@whiskeysockets/baileys').BufferJSON.replacer);
+        const dbMock = {
+            getStickerCache: async () => { dbReads++; return expJson; },
+            deleteStickerCache: async (k) => { borrados.push(k); return true; }
+        };
+        limpiarCacheMemoriaStickers();
+        assert.strictEqual(await obtenerStickerCache(claveExp, dbMock, { conAudio: true }), null);
+        assert.strictEqual(dbReads, 1);
+        assert.deepStrictEqual(borrados, [claveExp], 'entrada vencida en DB debe borrarse para no re-consultarse');
+
+        // Entrada en RAM que vence con el tiempo: borra DB sin re-leerla
+        const porVencer = mensajeSticker();
+        porVencer.url = 'https://mmg.whatsapp.net/d/f/sticker?oe=' + Math.floor(Date.now() / 1000 + 120).toString(16);
+        await guardarStickerCache('v1:ram:vence', porVencer, null, { conAudio: true });
+        const realNow = Date.now;
+        try {
+            Date.now = () => realNow() + 180000;
+            assert.strictEqual(await obtenerStickerCache('v1:ram:vence', dbMock, { conAudio: true }), null);
+        } finally {
+            Date.now = realNow;
+        }
+        assert.strictEqual(dbReads, 1, 'RAM vencida no debe re-consultar Turso');
+        assert.deepStrictEqual(borrados, [claveExp, 'v1:ram:vence'], 'RAM vencida también limpia Turso');
+    });
+
+    await probar('GIF de WhatsApp (gifPlayback) se cachea sin audio en :v:n:', async () => {
+        limpiarCacheMemoriaStickers();
+        const hashGif = Buffer.alloc(32, 51);
+        const stickerNormal = mensajeSticker({ audio: false });
+        const { sock, estado } = sockFalso({ stickerEnviado: { key: { id: 'GIF1' }, message: { stickerMessage: stickerNormal } } });
+        const crearGif = () => ({
+            key: { remoteJid: '123@s.whatsapp.net', id: 'GIFMSG', fromMe: false },
+            message: { videoMessage: { mimetype: 'video/mp4', seconds: 3, gifPlayback: true, fileLength: 1500, fileSha256: hashGif } }
+        });
+        let audioCalls = 0;
+        let convCalls = 0;
+        await ejecutarSticker(sock, crearGif(), {
+            downloadMediaMessage: async () => Buffer.from('GIFMP4'),
+            convertirAWebp: async () => { convCalls++; return STICKER; },
+            prepararAudioParaSticker: async () => { audioCalls++; return null; }
+        });
+        assert.strictEqual(audioCalls, 0, 'GIF gifPlayback no debe intentar extraer audio');
+        assert.strictEqual(convCalls, 1);
+        await ejecutarSticker(sock, crearGif(), {
+            downloadMediaMessage: async () => { throw new Error('GIF segundo envío debe usar cache'); },
+            convertirAWebp: async () => { throw new Error('GIF segundo envío no debe convertir'); },
+            prepararAudioParaSticker: async () => { throw new Error('no debe preparar audio'); }
+        });
+        assert.strictEqual(estado.relay, 1, 'segundo GIF sale directo por relay');
+    });
+
+    await probar('enviarStickerPreSubido no corta por timeout mientras espera en sockProxy de cola', async () => {
+        const { sock: baseSock } = sockFalso();
+        let envioTerminado = false;
+        const queuedSock = {
+            ...baseSock,
+            _esColaProxy: true,
+            relayMessage: async (jid, message, opts) => {
+                await new Promise(r => setTimeout(r, 60));
+                envioTerminado = true;
+                return baseSock.relayMessage(jid, message, opts);
+            }
+        };
+        const res = await enviarStickerPreSubido(queuedSock, '123@s.whatsapp.net', mensajeSticker(), null, { relayTimeoutMs: 20 });
+        assert.ok(res && envioTerminado, 'con _esColaProxy debe esperar a la cola sin abortar a los 20ms');
+
+        let falloRaw = false;
+        const slowRawSock = {
+            ...baseSock,
+            relayMessage: async () => { await new Promise(r => setTimeout(r, 60)); }
+        };
+        try {
+            await enviarStickerPreSubido(slowRawSock, '123@s.whatsapp.net', mensajeSticker(), null, { relayTimeoutMs: 20 });
+        } catch (e) {
+            falloRaw = /timeout/i.test(e.message);
+        }
+        assert.strictEqual(falloRaw, true, 'sin _esColaProxy sí debe mantener timeout directo');
     });
 
     console.log(fallos ? `\n❌ ${fallos} test(s) fallaron` : '\n🎉 TEST STICKER CACHE OK');

@@ -35,4 +35,10 @@ function normalizarReachout(raw) {
     };
 }
 
-module.exports = { esError463, normalizarReachout, CODIGO_463 };
+function esActualizacion463(item) {
+    const params = item?.update?.messageStubParameters;
+    if (!Array.isArray(params) || params.length === 0) return false;
+    return Number(params[0]) === CODIGO_463 || params.some(p => Number(p) === CODIGO_463);
+}
+
+module.exports = { esError463, esActualizacion463, normalizarReachout, CODIGO_463 };

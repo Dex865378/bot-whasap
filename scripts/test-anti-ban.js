@@ -255,9 +255,59 @@ const assert = require('assert');
         assert.ok(src.includes('gaussianDelay(baseDelay'), 'debe usarse en la cola de salida');
     });
 
-    await probar('readMessages se llama antes de procesar', async () => {
+    await probar('readMessages solo se llama tras filtrar relevancia y !fromMe', async () => {
         const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
-        assert.ok(src.includes('sock.readMessages([msg.key])'), 'debe marcar mensajes como leídos');
+        const upsertIdx = src.indexOf("sock.ev.on('messages.upsert'");
+        const procIdx = src.indexOf('async function procesarMensaje');
+        const upsertSection = src.slice(upsertIdx, procIdx);
+        assert.ok(!upsertSection.includes('sock.readMessages([msg.key])'),
+            'no debe marcar leído en cada mensaje de messages.upsert antes de filtrar relevancia');
+        const procSection = src.slice(procIdx);
+        assert.ok(procSection.includes('sock.readMessages([msg.key])'),
+            'debe marcar mensajes como leídos solo en procesarMensaje tras validar relevancia');
+    });
+
+    await probar('ningun react sale si reacciones estan desactivadas (index ni sockProxy)', async () => {
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        assert.ok(!/globalWait > 0[\s\S]{0,120}react:\s*\{/.test(src),
+            'cooldown global no debe enviar reaccion en grupos off ni DMs');
+        const fnStart = src.indexOf('function crearSockProxy');
+        assert.ok(fnStart > 0, 'crearSockProxy debe existir');
+        const proxyBlock = src.slice(fnStart, fnStart + 800);
+        assert.ok(proxyBlock.includes('content.react') && proxyBlock.includes('permitirReacciones'),
+            'crearSockProxy debe filtrar reacciones cuando estan desactivadas');
+        assert.ok(proxyBlock.includes('_esColaProxy'),
+            'crearSockProxy debe marcar _esColaProxy para no disparar timeout de cola en stickers');
+    });
+
+    await probar('database.getReacciones y setReacciones respetan default OFF y rowsAffected', async () => {
+        const dbMod = require('../database');
+        assert.strictEqual(await dbMod.getReacciones('no-conectado@g.us'), 0, 'sin DB debe devolver 0 (off)');
+        assert.strictEqual(await dbMod.setReacciones('no-conectado@g.us', true), false, 'sin DB debe devolver false');
+        const dbSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'database.js'), 'utf8');
+        const setIdx = dbSrc.indexOf('async function setReacciones');
+        const setBlock = dbSrc.slice(setIdx, setIdx + 400);
+        assert.ok(setBlock.includes('rowsAffected'), 'setReacciones debe comprobar rowsAffected');
+    });
+
+    await probar('commands/reacciones.js reporta desactivadas por defecto (null/0) y falla si DB no actualiza', async () => {
+        const mod = require('../commands/reacciones');
+        const enviados = [];
+        const sockMock = { sendMessage: async (_j, c) => { enviados.push(c); return { key: { id: 'R1' } }; } };
+        const msgMock = { key: { id: 'M1' } };
+        await mod.execute(sockMock, 'grp@g.us', msgMock, [], {
+            isGroup: true, isAdmin: true, isGlobalAdmin: false,
+            db: { getReacciones: async () => 0, setReacciones: async () => false },
+            botState: {}
+        });
+        assert.ok(enviados[0].text.includes('desactivadas'), 'con 0 debe reportar desactivadas');
+        await mod.execute(sockMock, 'grp@g.us', msgMock, ['on'], {
+            isGroup: true, isAdmin: true, isGlobalAdmin: false,
+            db: { getReacciones: async () => 0, setReacciones: async () => false },
+            botState: {}
+        });
+        assert.ok(enviados[1].text.includes('Error') || enviados[1].text.includes('!bot on'),
+            'si setReacciones devuelve false debe avisar error');
     });
 
     await probar('cooldown global de stickers (STICKER_GLOBAL_COOLDOWN_MS)', async () => {
@@ -350,6 +400,24 @@ const assert = require('assert');
         assert.ok(fnBody.includes('esError463(e)'), 'la cola debe detectar 463');
         assert.ok(fnBody.indexOf('esError463(e)') < fnBody.indexOf("rate-overlimit"),
             'el 463 debe revisarse antes del reintento de 429');
+    });
+
+    await probar('esActualizacion463 detecta ack 463 en messages.update y el indice lo escucha', async () => {
+        const { esActualizacion463 } = require('../utils/reachout');
+        assert.strictEqual(typeof esActualizacion463, 'function', 'debe exportar esActualizacion463');
+        assert.strictEqual(esActualizacion463({ update: { messageStubParameters: ['463', 'Your account has been restricted'] } }), true);
+        assert.strictEqual(esActualizacion463({ update: { messageStubParameters: ['479'] } }), false);
+        assert.strictEqual(esActualizacion463(null), false);
+        const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+        assert.ok(src.includes("sock.ev.on('messages.update'") && src.includes('esActualizacion463'),
+            'index.js debe escuchar messages.update para capturar 463 asincrono');
+    });
+
+    await probar('getAllAuthKeys prioriza claves recientes con ORDER BY updated_at DESC', async () => {
+        const dbSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'database.js'), 'utf8');
+        const match = dbSrc.match(/FROM auth_keys WHERE id != 'creds'[^`"']*/);
+        assert.ok(match && /ORDER BY updated_at DESC/i.test(match[0]),
+            'getAllAuthKeys debe ordenar por updated_at DESC para no perder tctoken/sesiones nuevas >5000');
     });
 
     console.log(fallos === 0 ? '\n🎉 TEST ANTI-BAN OK' : `\n💥 TEST ANTI-BAN: ${fallos} fallo(s)`);

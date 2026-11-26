@@ -392,7 +392,7 @@ function clonarStickerMsg(stickerMsg) {
     }
 }
 
-async function enviarStickerPreSubido(sock, jid, stickerMsgOrBytes, quoted) {
+async function enviarStickerPreSubido(sock, jid, stickerMsgOrBytes, quoted, opts = {}) {
     if (!sock || !stickerMsgOrBytes) return null;
     parchearProtoSonido();
     const decodificado = Buffer.isBuffer(stickerMsgOrBytes)
@@ -430,12 +430,18 @@ async function enviarStickerPreSubido(sock, jid, stickerMsgOrBytes, quoted) {
     // campo 26: se reengancha después de generar el mensaje.
     if (savedAudio) waMsg.message.stickerMessage.audioMessage = savedAudio;
 
+    const relayTimeoutMs = Number(opts?.relayTimeoutMs) > 0 ? Number(opts.relayTimeoutMs) : RELAY_TIMEOUT_MS;
     const enviarOnce = () => {
+        // Cuando sock es el Proxy de colaSalida, esperar en cola puede superar
+        // relayTimeoutMs y procesarColaSalida ya aplica SEND_MESSAGE_TIMEOUT_MS al envío real.
+        if (sock._esColaProxy) {
+            return sock.relayMessage(jid, waMsg.message, { messageId: waMsg.key.id });
+        }
         let timer;
         return Promise.race([
             sock.relayMessage(jid, waMsg.message, { messageId: waMsg.key.id }),
             new Promise((_, rej) => {
-                timer = setTimeout(() => rej(new Error('relayMessage timeout')), RELAY_TIMEOUT_MS);
+                timer = setTimeout(() => rej(new Error('relayMessage timeout')), relayTimeoutMs);
             })
         ]).finally(() => clearTimeout(timer));
     };

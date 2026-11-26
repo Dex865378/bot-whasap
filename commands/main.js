@@ -567,7 +567,7 @@ module.exports = {
             }
 
             const entradaMedia = mediaPropia ? msg : { key: msg.key, message: citada };
-            const necesitaAudio = esVideo || !!audioCitado;
+            const necesitaAudio = (esVideo && !media.gifPlayback) || !!audioCitado;
             const fallbackAudio = (buf, maxSeg) => prepararAudioParaSticker(buf, FFMPEG_PATH, maxSeg);
             const manejarErrorDescarga = (eDesc) => {
                 console.error('[STICKER] Descarga falló:', eDesc.message);
@@ -673,14 +673,15 @@ module.exports = {
                         return sock.sendMessage(chatId, { text: '⚠️ *Archivo muy pesado* (más de 15MB).\nManda un video más corto o una imagen más liviana.' }, { quoted: msg });
                     }
                     const tareaAudio = (async () => {
+                        if (!necesitaAudio) return null;
                         try {
-                            if (esVideo) return await fallbackAudio(buffer, 6);
                             if (audioCitado) {
                                 const audioBuf = await descargarConTimeout(downloadMediaMessage, { key: msg.key, message: citada });
                                 if (audioBuf && audioBuf.length && audioBuf.length <= 15 * 1024 * 1024) {
                                     return await fallbackAudio(audioBuf, 10);
                                 }
                             }
+                            if (esVideo) return await fallbackAudio(buffer, 6);
                         } catch (eAudio) {
                             console.warn('[STICKER] No pude preparar el sonido:', eAudio.message);
                         }

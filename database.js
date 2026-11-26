@@ -739,7 +739,7 @@ async function getAllAuthKeys(limit = 5000) {
     if (!connected) return {};
     try {
         const rs = await dbClient.execute({
-            sql: "SELECT id, data FROM auth_keys WHERE id != 'creds' LIMIT ?",
+            sql: "SELECT id, data FROM auth_keys WHERE id != 'creds' ORDER BY updated_at DESC LIMIT ?",
             args: [limit]
         });
         const result = {};
@@ -1698,23 +1698,23 @@ async function obtenerFlashStatus(chatId) {
 async function setReacciones(chatId, activar) {
     if (!connected) return false;
     try {
-        await dbClient.execute({
+        const rs = await dbClient.execute({
             sql: 'UPDATE grupos_activados SET reacciones = ? WHERE chat_id = ?',
             args: [activar ? 1 : 0, chatId]
         });
-        return true;
+        return (rs.rowsAffected || 0) > 0;
     } catch (e) { return false; }
 }
 
 async function getReacciones(chatId) {
-    if (!connected) return 1;
+    if (!connected) return 0;
     try {
         const rs = await dbClient.execute({
             sql: 'SELECT reacciones FROM grupos_activados WHERE chat_id = ?',
             args: [chatId]
         });
-        return rs.rows[0]?.reacciones ?? 1;
-    } catch (e) { return 1; }
+        return rs.rows[0]?.reacciones === 1 ? 1 : 0;
+    } catch (e) { return 0; }
 }
 
 module.exports = {

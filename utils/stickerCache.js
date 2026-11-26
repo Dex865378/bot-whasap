@@ -163,6 +163,11 @@ function quitarMemoria(clave) {
 
 async function obtenerStickerCache(clave, dbRef = null, { conAudio } = {}) {
     if (!clave) { stats.misses++; return null; }
+    const eliminarDeDb = () => {
+        if (dbRef && typeof dbRef.deleteStickerCache === 'function') {
+            Promise.resolve(dbRef.deleteStickerCache(clave)).catch(() => { });
+        }
+    };
     const enMemoria = mem.get(clave);
     if (enMemoria) {
         const obj = deserializarStickerCache(enMemoria.json);
@@ -173,6 +178,8 @@ async function obtenerStickerCache(clave, dbRef = null, { conAudio } = {}) {
         }
         quitarMemoria(clave);
         stats.invalid++;
+        eliminarDeDb();
+        return null;
     }
 
     stats.misses++;
@@ -184,6 +191,7 @@ async function obtenerStickerCache(clave, dbRef = null, { conAudio } = {}) {
         const obj = deserializarStickerCache(json);
         if (!obj || (typeof conAudio === 'boolean' && !esStickerCacheValido(obj, conAudio))) {
             stats.invalid++;
+            eliminarDeDb();
             return null;
         }
         tocarMemoria(clave, json);
