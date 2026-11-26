@@ -78,6 +78,44 @@ const assert = require('assert');
         assert.strictEqual(r, 0, 'usuario diferente debe pasar libre');
     });
 
+    // ── Aviso de los 60 s: regresión del bug "el mensaje nunca sale" ──
+    // El cooldown global de 4 s cortaba ANTES del chequeo por usuario, así que
+    // quien reintentaba enseguida (lo que hacen todos) se iba en silencio.
+    await probar('aviso de 60 s: el chequeo del usuario va ANTES del global', async () => {
+        const fs = require('fs');
+        const path = require('path');
+        const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+        const iUser = src.indexOf("consultarCooldown(sender, '!s-user'");
+        const iGlobal = src.indexOf("verificarCooldown('BOT', '!s-global'");
+        assert.ok(iUser > 0, 'falta el chequeo por usuario con consultarCooldown');
+        assert.ok(iGlobal > 0, 'falta el cooldown global');
+        assert.ok(iUser < iGlobal, 'el aviso de los 60 s se consulta después del cooldown global: saldría en silencio');
+        assert.ok(src.includes('stickerGate.notices++'), 'el aviso enviado no se cuenta en /health');
+        assert.ok(src.includes('stickerGate: { ...stickerGate }'), '/health no expone los contadores del candado');
+        assert.ok(src.includes("verificarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);"), 'falta marcar el turno real del usuario al final');
+    });
+
+    await probar('aviso de 60 s: consultar no consume el turno del usuario', async () => {
+        const map = new Map();
+        const consultar = (u, c, ms) => {
+            const falta = ms - (Date.now() - (map.get(`${u}-${c}`) || 0));
+            return falta > 0 ? Math.ceil(falta / 1000) : 0;
+        };
+        const verificar = (u, c, ms) => {
+            const r = consultar(u, c, ms);
+            if (r === 0) map.set(`${u}-${c}`, Date.now());
+            return r;
+        };
+        verificar('u1', '!s-user', 60000);   // el sticker que sí salió
+        verificar('BOT', '!s-global', 4000); // y la pausa global que dejó
+        assert.ok(verificar('BOT', '!s-global', 4000) > 0, 'el global debe estar activo');
+        const wait = consultar('u1', '!s-user', 60000);
+        const wait2 = consultar('u1', '!s-user', 60000);
+        assert.strictEqual(wait, wait2, 'consultar no debe consumir el turno del usuario');
+        assert.ok(wait > 0, 'con el global activo el aviso sigue mostrando los segundos');
+        assert.ok(wait >= 59 && wait <= 60, `segundos esperados ~60, obtuvo ${wait}`);
+    });
+
     // ── Per-group budget ──
     await probar('budget de grupo: permite 15, bloquea el 16', async () => {
         const stickerGroupBudget = new Map();

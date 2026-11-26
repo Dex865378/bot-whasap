@@ -89,6 +89,9 @@ let FFMPEG_PATH = resolverFfmpeg();
 const adminCache = new Map();
 const TTL_ADMIN = 10 * 60 * 1000; // 10 minutos
 const cooldowns = new Map(); // ESCUDO ANTI-SPAM
+// Contadores del candado de stickers (se ven en /health): sirven para saber
+// si los usuarios están pegando el límite y si el aviso realmente sale.
+const stickerGate = { userHits: 0, notices: 0, adminSkip: 0 };
 
 // Sincronización del nombre de WhatsApp: antes hacía un SELECT por CADA
 // comando (la caché de 30s lo aliviaba, pero un usuario activo igual
@@ -482,6 +485,14 @@ function verificarCooldown(userId, comando, ms = 3000) {
     if (ahora - last < ms) return Math.ceil((ms - (ahora - last)) / 1000);
     cooldowns.set(key, ahora);
     return 0;
+}
+
+// Igual que verificarCooldown pero SIN marcar el turno: sirve para avisar
+// cuánto falta sin castigar a quien igual no va a poder hacer el sticker.
+function consultarCooldown(userId, comando, ms = 3000) {
+    const key = `${userId}-${comando}`;
+    const falta = ms - (Date.now() - (cooldowns.get(key) || 0));
+    return falta > 0 ? Math.ceil(falta / 1000) : 0;
 }
 
 // Caché en RAM de assets de bienvenida (evita fs.readFileSync por cada join)
@@ -985,6 +996,7 @@ function dashboardHandler(req, res) {
             },
             latencia: resumenLatencias(),
             stickersPool: { ...stickerPool.getStats(), cacheCleanups: _stickerCleanups },
+            stickerGate: { ...stickerGate },
             inFlightMsgs: mensajesEnVuelo,
             groupMetaCached: groupMetaCache.size,
             groupMetaStats,
@@ -2069,37 +2081,49 @@ async function procesarMensaje(sock, msg) {
             }
 
             // --- RATE LIMIT DE STICKERS (anti-ban): 1 cada 60s por usuario, cooldown global, máx N/min por grupo ---
-            if (esStickerIlimitado && !isGlobalAdmin) {
-                // Cooldown global: mínimo N segundos entre CUALQUIER sticker del bot
-                const globalStickerWait = verificarCooldown('BOT', '!s-global', STICKER_GLOBAL_COOLDOWN_MS);
-                if (globalStickerWait > 0) return;
-                const stickerWait = verificarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);
-                if (stickerWait > 0) {
-                    // Antes salia en silencio y parecia que el bot estaba roto.
-                    // Se avisa cuanto falta (con su propio cooldown para no spamear).
-                    if (verificarCooldown(sender, '!s-wait-notice', 15000) === 0) {
-                        const segTotal = Math.round(STICKER_USER_COOLDOWN_MS / 1000);
-                        sock.sendMessage(chatId, {
-                            text: `⏳ *Espera ${stickerWait} s* para otro sticker.\n`
-                                + `Va 1 cada ${segTotal} s por persona, si no WhatsApp nos frena el número 😅`
-                        }, { quoted: msg }).catch(() => { });
-                    }
-                    return;
-                }
-                if (isGroup) {
-                    const ahora = Date.now();
-                    let budget = stickerGroupBudget.get(chatId);
-                    if (!budget || ahora - budget.windowStart > 60000) {
-                        budget = { count: 0, windowStart: ahora };
-                        stickerGroupBudget.set(chatId, budget);
-                    }
-                    if (budget.count >= STICKER_GROUP_PER_MIN) {
-                        if (verificarCooldown(chatId, 'sticker-limit-notice', 30000) === 0) {
-                            sock.sendMessage(chatId, { text: '⏳ *Límite de stickers por minuto alcanzado.* Espera unos segundos.' }, { quoted: msg }).catch(() => {});
+            if (esStickerIlimitado) {
+                if (isGlobalAdmin) {
+                    stickerGate.adminSkip++;
+                } else {
+                    // 1) Límite de 60 s del usuario, SIEMPRE primero: si ya hizo un
+                    //    sticker tiene que ver cuánto le falta, aunque el bot esté en
+                    //    su pausa global de 4 s (antes se salía en silencio en el global
+                    //    y por eso el aviso "no salía nunca" al reintentar seguido).
+                    const stickerWait = consultarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);
+                    if (stickerWait > 0) {
+                        stickerGate.userHits++;
+                        // Su propio cooldown para no spamear el grupo con avisos.
+                        if (verificarCooldown(sender, '!s-wait-notice', 15000) === 0) {
+                            stickerGate.notices++;
+                            const segTotal = Math.round(STICKER_USER_COOLDOWN_MS / 1000);
+                            sock.sendMessage(chatId, {
+                                text: `⏳ *Espera ${stickerWait} s* para otro sticker.\n`
+                                    + `Va 1 cada ${segTotal} s por persona, si no WhatsApp nos frena el número 😅`
+                            }, { quoted: msg }).catch(() => { });
                         }
                         return;
                     }
-                    budget.count++;
+                    // 2) Cooldown global: mínimo N segundos entre CUALQUIER sticker del bot
+                    if (verificarCooldown('BOT', '!s-global', STICKER_GLOBAL_COOLDOWN_MS) > 0) return;
+                    // 3) Presupuesto por grupo/minuto
+                    if (isGroup) {
+                        const ahora = Date.now();
+                        let budget = stickerGroupBudget.get(chatId);
+                        if (!budget || ahora - budget.windowStart > 60000) {
+                            budget = { count: 0, windowStart: ahora };
+                            stickerGroupBudget.set(chatId, budget);
+                        }
+                        if (budget.count >= STICKER_GROUP_PER_MIN) {
+                            if (verificarCooldown(chatId, 'sticker-limit-notice', 30000) === 0) {
+                                sock.sendMessage(chatId, { text: '⏳ *Límite de stickers por minuto alcanzado.* Espera unos segundos.' }, { quoted: msg }).catch(() => {});
+                            }
+                            return;
+                        }
+                        budget.count++;
+                    }
+                    // 4) Recién ahora se marca el turno del usuario: si el sticker
+                    //    igual no se hace (global o cupo del grupo), no se le castiga.
+                    verificarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);
                 }
             }
 

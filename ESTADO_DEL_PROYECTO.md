@@ -212,3 +212,11 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Fix**: `prepararAudioParaSticker()` ahora calcula 64 promedios de amplitud del PCM 8 kHz, los normaliza contra el máximo y escribe un byte 0-100 por muestra. Audio mudo queda en 1 (no cero) para conservar una forma de onda mínima.
 - **Decoder de entrada**: el wrapper de `StickerMessage.decode` capturaba `reader.pos` DESPUÉS de decodificar (ya al final), y además el escaneo saltaba un byte con `r.pos += r.uint32()`. Ahora captura posición/límite antes y lee el largo primero. Esto permite ver el `AudioMessage` real de stickers con sonido recibidos (`[SONIDO-DE-VERDAD]` en logs).
 - **Tests**: `scripts/test-sticker-audio.js` exige waveform de 64 bytes con valores 0-100 y que `proto.Message.decode()` recupere el campo 26 de un sticker entrante. Antes del fix ambos fallaban.
+
+### Aviso de los 60 s que nunca salía (v11.5.4, 2026-11-24)
+- **Síntoma**: al pegar el cooldown de stickers el bot debía avisar `⏳ Espera X s`, pero el mensaje no aparecía nunca.
+- **Causa raíz**: el cooldown global de 4 s se evaluaba ANTES del límite de 60 s por usuario (`if (globalStickerWait > 0) return;`). Quien reintentaba enseguida —el caso normal— moría en silencio en el global y jamás llegaba al aviso.
+- **Fix**: `consultarCooldown()` consulta SIN marcar el turno y va primero; el turno del usuario (`!s-user`) se marca recién al final, cuando el sticker sí se va a hacer. Así un rechazo por cooldown global o cupo de grupo no castiga 60 s de gusto.
+- **Diagnóstico**: `/health` ahora trae `stickerGate { userHits, notices, adminSkip }`.
+- **Ojo al probar**: los números de `NUMERO_ADMIN` no pasan por el candado (se cuentan en `adminSkip`); con el número del dueño el aviso no sale por diseño.
+- **Test**: `npm run test-anti-ban` exige que el chequeo por usuario quede antes del global (falla con el orden viejo).
