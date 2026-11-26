@@ -694,6 +694,13 @@ function sockFalso({ fallaUpload = false } = {}) {
         assert.ok(idxSrc.includes('tursoAuthFlush'), 'apagar() debe hacer flush de claves Signal en Turso');
     });
 
+    await probar('avisa cuantos segundos faltan cuando pegan el cooldown de sticker (60 s)', () => {
+        const idxSrc = fs.readFileSync(path.join(RAIZ, 'index.js'), 'utf8');
+        assert.ok(!/if \(stickerWait > 0\) return;/.test(idxSrc), 'no debe salir en silencio al pegar el cooldown');
+        assert.ok(idxSrc.includes("'!s-wait-notice'"), 'el aviso lleva su propio cooldown para no spamear');
+        assert.ok(/Espera \$\{stickerWait\} s/.test(idxSrc), 'el aviso debe decir cuantos segundos faltan');
+    });
+
     await probar('turso-auth precarga claves Signal en RAM, coalesce escrituras y hace flush batch', async () => {
         const dbMod = require('../database');
         const orig = {

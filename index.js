@@ -2074,7 +2074,18 @@ async function procesarMensaje(sock, msg) {
                 const globalStickerWait = verificarCooldown('BOT', '!s-global', STICKER_GLOBAL_COOLDOWN_MS);
                 if (globalStickerWait > 0) return;
                 const stickerWait = verificarCooldown(sender, '!s-user', STICKER_USER_COOLDOWN_MS);
-                if (stickerWait > 0) return;
+                if (stickerWait > 0) {
+                    // Antes salia en silencio y parecia que el bot estaba roto.
+                    // Se avisa cuanto falta (con su propio cooldown para no spamear).
+                    if (verificarCooldown(sender, '!s-wait-notice', 15000) === 0) {
+                        const segTotal = Math.round(STICKER_USER_COOLDOWN_MS / 1000);
+                        sock.sendMessage(chatId, {
+                            text: `⏳ *Espera ${stickerWait} s* para otro sticker.\n`
+                                + `Va 1 cada ${segTotal} s por persona, si no WhatsApp nos frena el número 😅`
+                        }, { quoted: msg }).catch(() => { });
+                    }
+                    return;
+                }
                 if (isGroup) {
                     const ahora = Date.now();
                     let budget = stickerGroupBudget.get(chatId);
