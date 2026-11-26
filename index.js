@@ -81,7 +81,17 @@ const PUBLIC_RENDER_URL = process.env.RENDER_EXTERNAL_URL
 const PAIRING_CODE_TTL_MS = envInt('PAIRING_CODE_TTL_MS', 180000, 60000);
 const PAIRING_MIN_INTERVAL_MS = envInt('PAIRING_MIN_INTERVAL_MS', 180000, 60000);
 const PAIRING_RATE_LIMIT_BACKOFF_MS = envInt('PAIRING_RATE_LIMIT_BACKOFF_MS', 3600000, 300000);
-const PAIRING_METHOD = (process.env.PAIRING_METHOD || 'qr').toLowerCase();
+// 'both' (por defecto): muestra el QR y ADEMAS pide codigo de vinculacion.
+// 'qr': solo QR. 'code': solo codigo (no muestra QR).
+const PAIRING_METHOD = (process.env.PAIRING_METHOD || 'both').toLowerCase();
+// Numero con el que se vincula por codigo (8 caracteres). Tiene que ser UN
+// solo numero real: NUMERO_ADMIN puede venir en lista ("123,456") y WhatsApp
+// rechaza el codigo. Si no hay numero valido, el bot sigue mostrando el QR.
+const PAIRING_NUMBER = (() => {
+    const crudo = String(process.env.PAIRING_NUMBER || process.env.NUMERO_BOT || '').trim();
+    const limpio = crudo.replace(/^\+/, '').replace(/[\s-]/g, '');
+    return /^\d{10,15}$/.test(limpio) ? limpio : null;
+})();
 
 let FFMPEG_PATH = resolverFfmpeg();
 
@@ -614,9 +624,11 @@ if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 // --- ESTADO GLOBAL ---
 const botState = {
     pairingCode: null,
+    pairingPhone: null,
     pairingCodeAt: 0,
     nextPairingRequestAt: 0,
     pairingFailures: 0,
+    dashboardSeenAt: 0,
     qrDataUrl: null,
     qrAt: 0,
     lastDisconnectCode: null,
@@ -857,22 +869,34 @@ function dashboardHandler(req, res) {
     };
 
     if (url.pathname === '/' && req.method === 'GET') {
+        botState.dashboardSeenAt = Date.now();
         const up = Math.floor((Date.now() - botState.startTime) / 1000);
         const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60), s = up % 60;
         const dbBadge = db.isConnected()
             ? '<span style="background:#166534;color:#4ade80;padding:2px 8px;border-radius:10px">TURSO ✅</span>'
             : '<span style="background:#7f1d1d;color:#fca5a5;padding:2px 8px;border-radius:10px">LOCAL 📁</span>';
+        const codigoViejo = botState.pairingCode && (Date.now() - botState.pairingCodeAt > PAIRING_CODE_TTL_MS);
+        const phoneTxt = botState.pairingPhone
+            ? `+${botState.pairingPhone}`
+            : (PAIRING_NUMBER ? `+${PAIRING_NUMBER}` : '');
         const statusHtml = botState.isConnected
             ? '<p style="color:#22c55e;font-size:1.5em">✅ BOT ONLINE</p>'
             : botState.pairingCode
                 ? `<p style="color:#94a3b8">CÓDIGO DE VINCULACIÓN:</p>
-                   <p style="font-size:3em;letter-spacing:10px;color:#facc15;font-weight:bold">${botState.pairingCode}</p>
-                   <p style="color:#64748b;font-size:0.8em">WhatsApp → Dispositivos vinculados → Vincular con número</p>`
-                : `<p style="color:#eab308;font-size:1.2em">⏳ ${botState.status}</p>`;
+                   <p style="font-size:3em;letter-spacing:10px;color:${codigoViejo ? '#64748b' : '#facc15'};font-weight:bold">${botState.pairingCode}</p>
+                   ${phoneTxt ? `<p style="color:#e2e8f0;margin:6px 0">Número: <b>${phoneTxt}</b></p>` : ''}
+                   <p style="color:#64748b;font-size:0.85em">WhatsApp → Dispositivos vinculados → Vincular con número de teléfono</p>
+                   ${codigoViejo
+                       ? '<p style="color:#f87171;font-size:0.85em">Caducado: pidiendo uno nuevo...</p>'
+                       : '<p style="color:#475569;font-size:0.75em;margin-top:6px">Si caduca, esta pagina pide uno nuevo sola.</p>'}`
+                : `<p style="color:#eab308;font-size:1.2em">⏳ ${botState.status}</p>`
+                  + (!PAIRING_NUMBER && PAIRING_METHOD !== 'code'
+                      ? '<p style="color:#64748b;font-size:0.8em;margin-top:8px">Para vincular con código agrega NUMERO_BOT (un solo número, con código de país) en Render.</p>'
+                      : '');
 
         const qrHtml = (!botState.isConnected && botState.qrDataUrl)
             ? `<div style="margin-top:16px">
-                   <p style="color:#94a3b8;margin-bottom:8px">QR DE VINCULACION:</p>
+                   <p style="color:#94a3b8;margin-bottom:8px">${botState.pairingCode ? 'O ESCANEA EL QR:' : 'QR DE VINCULACION:'}</p>
                    <img src="${botState.qrDataUrl}" alt="QR WhatsApp" style="background:#fff;padding:10px;border-radius:10px;max-width:260px;width:100%;display:block;margin:0 auto">
                    <p style="color:#64748b;font-size:0.8em;margin-top:8px">WhatsApp -> Dispositivos vinculados -> Vincular dispositivo</p>
                </div>`
@@ -979,6 +1003,7 @@ async function resetAuthSession(reason = 'manual reset') {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
     botState.isConnected = false;
     botState.pairingCode = null;
+    botState.pairingPhone = null;
     botState.qrDataUrl = null;
     botState.qrAt = 0;
     botState.status = 'Sesion borrada. Reiniciando...';
@@ -1166,7 +1191,7 @@ async function startBot() {
     });
     activeSock = sock;
 
-    const needsPairingCode = PAIRING_METHOD === 'code' && !sock.authState.creds.registered && BOT_NUMBER;
+    const needsPairingCode = PAIRING_METHOD !== 'qr' && !sock.authState.creds.registered && PAIRING_NUMBER;
     let pairingRequested = false;
 
     // PRIMERO registrar event handlers
@@ -1186,8 +1211,12 @@ async function startBot() {
             }
         }
 
-        // Si recibimos QR y necesitamos pairing, pedirlo ahora
-        if (qr && needsPairingCode && !pairingRequested) {
+        // Si recibimos QR y necesitamos pairing, pedirlo ahora. Un codigo
+        // vencido se renueva solo si alguien esta mirando el dashboard: sin
+        // eso, el bot pediria codigos para siempre y WhatsApp lo bloquearia.
+        const codigoVencido = botState.pairingCode && (Date.now() - botState.pairingCodeAt > PAIRING_CODE_TTL_MS);
+        const mirandoDashboard = Date.now() - botState.dashboardSeenAt < 120000;
+        if (qr && needsPairingCode && (!pairingRequested || (codigoVencido && mirandoDashboard))) {
             const now = Date.now();
             const waitMs = botState.nextPairingRequestAt - now;
             if (waitMs > 0) {
@@ -1206,7 +1235,8 @@ async function startBot() {
             botState.pairingCode = null;
 
             pairingRequested = true;
-            const phoneClean = BOT_NUMBER.replace(/[^0-9]/g, '');
+            const phoneClean = PAIRING_NUMBER;
+            botState.pairingPhone = phoneClean;
             console.log(`📱 Solicitando código de vinculación para: ${phoneClean}...`);
             botState.status = `Generando para ${phoneClean}...`;
 
@@ -1239,6 +1269,7 @@ async function startBot() {
             console.log('✅ BOT CONECTADO');
             botState.isConnected = true;
             botState.pairingCode = null;
+            botState.pairingPhone = null;
             botState.qrDataUrl = null;
             botState.qrAt = 0;
             botState.status = 'Online';
