@@ -16,7 +16,7 @@ Este es el respaldo de todas las variables que DEBEN estar en Render para que el
 | **TURSO_DATABASE_URL** | *(oculto — está en Render → Environment y en el .env local)* | Dirección de tu base de datos. |
 | **TURSO_AUTH_TOKEN** | *(oculto — está en Render → Environment y en el .env local)* | El token de persistencia (NO CAMBIAR). |
 | **NUMERO_ADMIN** | `109938613481683,50760541202` | Permisos de administrador. |
-| **RENDER_EXTERNAL_URL** | `https://diky1.onrender.com` | URL para evitar que el bot se duerma. |
+| **RENDER_EXTERNAL_URL** | `https://bot-whasap-l0xs.onrender.com` | URL real del servicio activo (la setea Render solo). Confirmada en `bot_instancias.public_url`. |
 | **PORT** | `10000` | Puerto fijo. |
 
 ---
