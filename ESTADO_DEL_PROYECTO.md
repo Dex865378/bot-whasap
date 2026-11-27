@@ -227,6 +227,14 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Diagnóstico**: `/health` ahora trae `stickerGate { userHits, notices, adminSkip }`.
 - **Ojo al probar**: los números de `NUMERO_ADMIN` no pasan por el candado (se cuentan en `adminSkip`); con el número del dueño el aviso no sale por diseño.
 - **Test**: `npm run test-anti-ban` exige que el chequeo por usuario quede antes del global (falla con el orden viejo).
+### Perfil de máxima calidad de stickers (v11.7.0, 2026-11-27)
+- **Motivo**: el bot corría con los perfiles pensados para Render (0.1 vCPU): 384 px, calidad 40, compresión 1 y scaler bilinear. En una PC eso es tirar calidad a la basura.
+- **Nuevo**: `STICKER_CALIDAD=alta` activa `PERFILES_VIDEO_ALTA` en `utils/stickerProcessor.js`: 512 px, calidad 78, compresión 4 y scaler **lanczos**. Si el WebP pasa el tope de 920 KB, cae a 512/62, luego 384/48, 320/36 y 256/28 (antes de reventar el límite de WhatsApp).
+- **Imagen fija**: con calidad alta sube de `-quality 75/-compression_level 4` a `90/5`, mismo 512 px lanczos.
+- **Audio**: `STICKER_AUDIO_PARALELO=1` vuelve a correr WebP y audio a la vez (antes secuencial por los 512 MB de Render) y `STICKER_VIDEO_THREADS` permite darle más hilos a ffmpeg.
+- **Sin efecto en Render**: si las variables no están, todo sigue exactamente como antes.
+- **Verificado**: `npm run test-stickers` verde; el caso de video de 14 s sigue bajando hasta 320 px para no pasar el tope.
+
 ### Baileys rc14 + estado de restricción 463 (v11.5.5, 2026-11-26)
 - **Upgrade**: `@whiskeysockets/baileys` 7.0.0-rc.9 → 7.0.0-rc14 (la última en npm ese día). La API que usa el bot (`makeWASocket`, `prepareWAMessageMedia`, `getWAUploadToServer`, `proto`, `downloadMediaMessage`, `getMediaKeys`, `Browsers`) sigue existiendo; smoke, anti-ban y sticker-audio pasan.
 - **Por qué**: rc14 trae manejo nativo del **Trusted Contact token** y del **reachout timelock (error 463)**: pide/renueva el `tctoken`, lo adjunta en mensajes 1:1 y reemite el token cuando WhatsApp responde 463. rc9 solo guardaba el token que llegaba; nunca lo pedía.

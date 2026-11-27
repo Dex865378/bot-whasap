@@ -26,6 +26,21 @@ const PERFILES_VIDEO_LOCAL = [
     { scale: 320, fps: 12, quality: 32, comp: 2 },
     { scale: 256, fps: 10, quality: 28, comp: 2 }
 ];
+// Máxima calidad para PC con CPU de sobra (STICKER_CALIDAD=alta): 512px,
+// 20 fps, scaler lanczos y WebP con más calidad. Si el archivo pasa el tope,
+// cae a los perfiles siguientes en vez de mandar algo ilegible.
+const PERFILES_VIDEO_ALTA = [
+    { scale: 512, fps: 15, quality: 78, comp: 4 },
+    { scale: 512, fps: 15, quality: 62, comp: 3 },
+    { scale: 384, fps: 15, quality: 48, comp: 3 },
+    { scale: 320, fps: 12, quality: 36, comp: 2 },
+    { scale: 256, fps: 10, quality: 28, comp: 2 }
+];
+
+function calidadAlta(opts = {}) {
+    if (opts.calidad) return opts.calidad === 'alta';
+    return process.env.STICKER_CALIDAD === 'alta';
+}
 
 let _cachedFfmpegPath = null;
 const _vsyncArgsCache = new Map();
@@ -109,6 +124,7 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
     const ffmpegPath = resolverFfmpeg(opts.ffmpegPath);
     const vfBase = (scale, interp) =>
         `scale=${scale}:${scale}:force_original_aspect_ratio=decrease:flags=${interp},format=rgba,pad=${scale}:${scale}:(ow-iw)/2:(oh-ih)/2:color=white@0,format=yuva420p`;
+    const alta = calidadAlta(opts);
 
     const intentar = async (comoVideo, soloUnFrame = false, bufOverride = null, perfil = null) => {
         const src = bufOverride || buffer;
@@ -124,9 +140,10 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
             const vsyncArgs = esAnimado ? await resolverArgsVsync(ffmpegPath) : [];
             const p = perfil || { scale: 512, fps: STICKER_VIDEO_FPS, quality: 45, comp: 1 };
             const maxSeg = String(opts.maxSegundos || STICKER_MAX_SEGUNDOS);
+            const interp = alta ? 'lanczos' : 'bilinear';
             const args = esAnimado
-                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', `${vfBase(p.scale, 'bilinear')},fps=${p.fps}`, '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', maxSeg, '-quality', String(p.quality), '-compression_level', String(p.comp), '-y', tmpOut]
-                : ['-threads', imgThreads, '-i', tmpIn, '-vf', vfBase(512, 'lanczos'), ...(soloUnFrame ? ['-vframes', '1'] : []), '-quality', '75', '-compression_level', '4', '-y', tmpOut];
+                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', `${vfBase(p.scale, interp)},fps=${p.fps}`, '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', maxSeg, '-quality', String(p.quality), '-compression_level', String(p.comp), '-y', tmpOut]
+                : ['-threads', imgThreads, '-i', tmpIn, '-vf', vfBase(512, 'lanczos'), ...(soloUnFrame ? ['-vframes', '1'] : []), '-quality', alta ? '90' : '75', '-compression_level', alta ? '5' : '4', '-y', tmpOut];
             await execFileAsync(ffmpegPath, args, { timeout: esAnimado ? 90000 : 25000, windowsHide: true });
             return await fs.promises.readFile(tmpOut);
         } finally {
@@ -158,7 +175,9 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
             return await agregarExifSticker(webp);
         }
 
-        const basePerfiles = (Number(opts.videoThreads) || 1) >= 2 ? PERFILES_VIDEO_PC : PERFILES_VIDEO_LOCAL;
+        const basePerfiles = alta
+            ? PERFILES_VIDEO_ALTA
+            : ((Number(opts.videoThreads) || 1) >= 2 ? PERFILES_VIDEO_PC : PERFILES_VIDEO_LOCAL);
         let ultimo = null;
         for (let i = 0; i < basePerfiles.length; i++) {
             const perfil = (i === 0 && Number(opts.fps) > 0) ? { ...basePerfiles[i], fps: Number(opts.fps) } : basePerfiles[i];
@@ -218,13 +237,15 @@ async function procesarStickerCompleto({
     ffmpegPath = null,
     parallelAudio = true,
     videoThreads = 1,
-    imgThreads = 2
+    imgThreads = 2,
+    calidad = null
 }) {
     const ffmpeg = resolverFfmpeg(ffmpegPath);
     const convertir = () => convertirAWebpBuffer(buffer, esVideo, {
         ffmpegPath: ffmpeg,
         videoThreads,
-        imgThreads
+        imgThreads,
+        calidad
     });
     const sacarAudio = async () => {
         if (!necesitaAudio) return null;

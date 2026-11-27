@@ -1164,7 +1164,11 @@ const stickerPool = new StickerPool({
         necesitaAudio,
         audioBuffer,
         ffmpegPath: FFMPEG_PATH,
-        parallelAudio: false // En Render 512MB corre secuencial para evitar picos OOM
+        // En Render (512MB) conviene secuencial; en una PC con RAM de sobra se
+        // puede correr audio y WebP en paralelo. STICKER_AUDIO_PARALELO=1 lo activa.
+        parallelAudio: process.env.STICKER_AUDIO_PARALELO === '1',
+        videoThreads: envInt('STICKER_VIDEO_THREADS', 1, 1),
+        calidad: process.env.STICKER_CALIDAD || null
     })
 });
 
