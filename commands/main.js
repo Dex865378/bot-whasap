@@ -749,6 +749,9 @@ module.exports = {
                         return;
                     }
                 }
+                if (necesitaAudio) {
+                    console.warn('[STICKER] Se envía sin sonido: no se pudo preparar la pista del audio (ver [STICKER-SONIDO]).');
+                }
                 const enviadoSinSonido = await sock.sendMessage(chatId, { sticker: stiker }, { quoted: msg });
                 // Si se esperaba audio y falló, NO se cachea: guardar un sticker
                 // mudo bajo la clave con audio envenenaría los siguientes envíos.

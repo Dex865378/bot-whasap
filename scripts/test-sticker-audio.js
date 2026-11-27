@@ -159,6 +159,48 @@ function sockFalso({ fallaUpload = false } = {}) {
         }
     });
 
+    await probar('audio del sticker reintenta con pan cuando el layout es raro (LFE+LFE2)', async () => {
+        if (!TIENE_FFMPEG) {
+            console.log('   (saltado: ffmpeg no está disponible)');
+            return;
+        }
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-layout-test-'));
+        const oggReal = path.join(dir, 'real.ogg');
+        try {
+            execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-ac', '1', '-c:a', 'libopus', '-b:a', '32k', '-f', 'ogg', '-y', oggReal], { windowsHide: true });
+            const oggBytes = fs.readFileSync(oggReal);
+            const pcm = Buffer.alloc(16000, 0); // 1 s a 8 kHz s16le
+            const llamadas = [];
+            const ejecutar = async (_bin, args) => {
+                const texto = args.join(' ');
+                llamadas.push(texto);
+                if (!texto.includes('pan=mono')) {
+                    // Lo que devuelve ffmpeg 9 con esos MP4 de WhatsApp.
+                    const err = new Error('Command failed');
+                    err.stderr = "[Parsed_aresample_0] [SWR] Input channel layout '2 channels (LFE+LFE2)' is not supported";
+                    throw err;
+                }
+                const salidas = args.reduce((acc, a, i) => (a === '-y' ? acc.concat(args[i + 1]) : acc), []);
+                fs.writeFileSync(salidas[0], oggBytes);
+                fs.writeFileSync(salidas[1], pcm);
+            };
+            const audio = await prepararAudioParaSticker(Buffer.from('VIDEO'), FFMPEG, 0, { ejecutar });
+            assert.ok(audio && audio.buffer.length === oggBytes.length, 'el reintento debe rescatar el audio');
+            assert.strictEqual(audio.waveform.length, 64, 'debe calcular la waveform');
+            assert.ok(Math.abs(audio.segundos - 1) < 0.01, 'la duración debe ser la del PCM (1s)');
+            assert.strictEqual(llamadas.length, 2, 'un intento normal y un reintento');
+            assert.ok(llamadas[0].includes('aresample=48000'), 'el primer intento usa el filtro normal');
+            assert.ok(llamadas[1].includes('pan=mono|c0=0.5*c0+0.5*c1,asetpts=PTS-STARTPTS'), 'el reintento mezcla por canal');
+            // Un fallo real (no de layout) no debe inventar audio.
+            const falla = async () => { throw new Error('ffmpeg roto'); };
+            const nulo = await prepararAudioParaSticker(Buffer.from('VIDEO'), FFMPEG, 0, { ejecutar: falla });
+            assert.strictEqual(nulo, null, 'si no hay forma de sacar audio devuelve null');
+        } finally {
+            try { fs.unlinkSync(oggReal); } catch (e) { }
+            try { fs.rmdirSync(dir); } catch (e) { }
+        }
+    });
+
     await probar('!s en video adjunta el audio del propio video', async () => {
         const { sock, estado } = sockFalso();
         const msg = {

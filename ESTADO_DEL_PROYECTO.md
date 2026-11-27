@@ -249,6 +249,14 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Aviso**: stickers de más de ~30 s pueden no reproducirse en algunos clientes de WhatsApp; el envío no falla.
 - **Test de regresión**: `scripts/test-sticker-audio.js` convierte un video de 20 s y exige `duración >= 18 s` y `<= 920 KB` (antes fallaba con 15.000 ms).
 
+### Sticker mudo con un MP4 de WhatsApp (v11.7.3, 2026-11-27)
+- **Síntoma**: `VID-20261127-WA0786.mp4` (1280x960, 19 s, AAC estéreo) salió como sticker **sin audio**. No era el tope de duración ni la resolución: era su cabecera de audio.
+- **Causa raíz**: el MP4 declara el layout `2 channels (LFE+LFE2)`, que libswresample no soporta; ffmpeg aborta al pasar a mono con `Input channel layout '2 channels (LFE+LFE2)' is not supported`. `prepararAudioParaSticker` devolvía `null` y el comando mandaba el sticker mudo. El aviso del error solo se imprimía si el OGG parcial existía, así que no quedó nada en el log.
+- **Fix**: si el primer ffmpeg falla, se reintenta con `pan=mono|c0=0.5*c0+0.5*c1,asetpts=PTS-STARTPTS,aresample=...` (pan mezcla por índice de canal y no consulta el layout). Igual en `extraerAudioSticker`. Ahora el fallo siempre loguea `[STICKER-SONIDO] prepararAudioParaSticker falló: ...` y el comando avisa `[STICKER] Se envía sin sonido ...` cuando termina mandando el sticker mudo.
+- **Medido**: ese video saca OGG de 78 KB / 19,09 s en 0,47 s, y el sticker completo sigue saliendo con sonido.
+- **Sin cambios para audios normales**: mono/estéreo estándar resuelven en el primer intento, sin tocar el volumen.
+- **Test de regresión**: `scripts/test-sticker-audio.js` simula el stderr real de ffmpeg y exige dos llamadas (normal + `pan`), audio válido y waveform; **falla sin el fix**.
+
 
 
 ### Baileys rc14 + estado de restricción 463 (v11.5.5, 2026-11-26)

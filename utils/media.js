@@ -100,7 +100,12 @@ function extParaBuffer(buffer, comoVideo) {
 // que WhatsApp usa para las notas de voz y para el audio del sticker.
 // `maxSegundos` 0 = sin tope (audio completo). Si el video no tiene audio,
 // ffmpeg falla y se devuelve null: el caller manda el sticker normal.
-async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 0) {
+//
+// Reintento con `pan`: algunos MP4 de WhatsApp declaran el layout de audio
+// "2 channels (LFE+LFE2)", que swresample rechaza; al pasar a mono aborta con
+// "Input channel layout ... is not supported" y el sticker salía mudo.
+async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 0, opciones = {}) {
+    const ejecutar = typeof opciones.ejecutar === 'function' ? opciones.ejecutar : execFileAsync;
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
     const pedido = Number(maxSegundos);
     const tope = Number.isFinite(pedido) && pedido > 0 ? Math.min(600, Math.floor(pedido)) : 0;
@@ -111,16 +116,21 @@ async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 
     try {
         // -map 0:a:0? no falla si no hay audio, pero el muxer sí se queja
         // porque no queda ningún stream; el catch lo convierte en null.
-        const args = [
+        const args = (af) => [
             '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1',
             '-i', tmpIn,
             '-vn', '-map', '0:a:0?',
-            '-ac', '1', '-ar', '48000',
+            ...(af ? ['-af', af, '-ac', '1', '-ar', '48000'] : ['-ac', '1', '-ar', '48000']),
             '-c:a', 'libopus', '-b:a', '32k', '-application', 'audio',
             ...(tope > 0 ? ['-t', String(tope)] : []),
             '-f', 'ogg', '-y', tmpOut
         ];
-        await execFileAsync(ffmpegPath, args, { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024 });
+        const opcionesEjecucion = { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024 };
+        try {
+            await ejecutar(ffmpegPath, args(null), opcionesEjecucion);
+        } catch (e) {
+            await ejecutar(ffmpegPath, args('pan=mono|c0=0.5*c0+0.5*c1,asetpts=PTS-STARTPTS'), opcionesEjecucion);
+        }
         const salida = fs.readFileSync(tmpOut);
         return salida.length > 100 ? salida : null;
     } catch (e) {

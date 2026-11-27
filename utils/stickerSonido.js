@@ -236,8 +236,16 @@ async function esperarArchivoCifrado(filePath, expectedSha256B64, maxEsperaMs = 
     }
 }
 
-async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 0) {
+// Filtros de normalización. El normal respeta el layout del contenedor; el de
+// "pan" se usa como reintento cuando el layout es raro (ver `prepararAudioParaSticker`).
+const filtroAudio = (rate) => `asetpts=PTS-STARTPTS,aresample=${rate}:async=1:first_pts=0`;
+const filtroAudioLayoutRaro = (rate) => `pan=mono|c0=0.5*c0+0.5*c1,asetpts=PTS-STARTPTS,aresample=${rate}:async=1:first_pts=0`;
+
+async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 0, opciones = {}) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+    // Permite inyectar el runner en los tests (simula el fallo de layout sin
+    // necesitar un MP4 real con esa cabecera).
+    const ejecutar = typeof opciones.ejecutar === 'function' ? opciones.ejecutar : execFileAsync;
     // 0 = sin tope: el audio dura lo mismo que el video (el sticker tampoco corta).
     const pedido = Number(maxSegundos);
     const tope = Number.isFinite(pedido) && pedido > 0 ? Math.min(600, Math.floor(pedido)) : 0;
@@ -246,21 +254,32 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
     const tmpOgg = path.join(os.tmpdir(), `stk_info_out_${uid}.ogg`);
     const tmpPcm = path.join(os.tmpdir(), `stk_info_out_${uid}.pcm`);
     await fs.promises.writeFile(tmpIn, buffer);
+    const argumentos = (af48, af8) => [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1',
+        '-fflags', '+genpts', '-err_detect', 'ignore_err',
+        '-i', tmpIn,
+        '-vn', '-sn', '-dn', '-map', '0:a:0?', '-map_metadata', '-1',
+        '-af', af48,
+        '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '32k', '-application', 'audio',
+        '-avoid_negative_ts', 'make_zero', ...(tope > 0 ? ['-t', String(tope)] : []), '-f', 'ogg', '-y', tmpOgg,
+        '-vn', '-sn', '-dn', '-map', '0:a:0?',
+        '-af', af8,
+        '-f', 's16le', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '8000',
+        ...(tope > 0 ? ['-t', String(tope)] : []), '-y', tmpPcm
+    ];
+    const opcionesEjecucion = { timeout: 30000, windowsHide: true, maxBuffer: 1024 * 1024 };
     let ogg = null;
     try {
-        await execFileAsync(ffmpegPath, [
-            '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1',
-            '-fflags', '+genpts', '-err_detect', 'ignore_err',
-            '-i', tmpIn,
-            '-vn', '-sn', '-dn', '-map', '0:a:0?', '-map_metadata', '-1',
-            '-af', 'asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0',
-            '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '32k', '-application', 'audio',
-            '-avoid_negative_ts', 'make_zero', ...(tope > 0 ? ['-t', String(tope)] : []), '-f', 'ogg', '-y', tmpOgg,
-            '-vn', '-sn', '-dn', '-map', '0:a:0?',
-            '-af', 'asetpts=PTS-STARTPTS,aresample=8000:async=1:first_pts=0',
-            '-f', 's16le', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '8000',
-            ...(tope > 0 ? ['-t', String(tope)] : []), '-y', tmpPcm
-        ], { timeout: 30000, windowsHide: true, maxBuffer: 1024 * 1024 });
+        try {
+            await ejecutar(ffmpegPath, argumentos(filtroAudio(48000), filtroAudio(8000)), opcionesEjecucion);
+        } catch (e) {
+            // MP4 de WhatsApp que declara el layout "2 channels (LFE+LFE2)": swresample
+            // no lo soporta y aborta con "Input channel layout ... is not supported".
+            // `pan` mezcla por índice de canal y no consulta el layout, así que el
+            // sticker sale con sonido en vez de mudo. El segundo intento sobrescribe
+            // cualquier archivo parcial del primero (`-y`).
+            await ejecutar(ffmpegPath, argumentos(filtroAudioLayoutRaro(48000), filtroAudioLayoutRaro(8000)), opcionesEjecucion);
+        }
 
         const [oggRead, pcm] = await Promise.all([
             fs.promises.readFile(tmpOgg),
@@ -278,7 +297,9 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
             waveform
         };
     } catch (e) {
-        if (ogg && ogg.length) console.warn('[STICKER-SONIDO] prepararAudioParaSticker falló:', e.message);
+        // Antes solo se avisaba si el OGG alcanzaba a existir; un fallo de ffmpeg
+        // dejaba el sticker mudo sin una sola línea en el log.
+        console.warn('[STICKER-SONIDO] prepararAudioParaSticker falló:', String(e?.stderr || e?.message || e).split('\n')[0].slice(0, 200));
         return null;
     } finally {
         await Promise.all([
