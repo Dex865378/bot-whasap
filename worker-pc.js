@@ -100,7 +100,9 @@ async function procesarJobRemoto(meta, buffers, ffmpegPath) {
         ffmpegPath,
         parallelAudio: true,
         videoThreads: 2,
-        imgThreads: 2
+        imgThreads: 2,
+        calidad: process.env.STICKER_CALIDAD || null,
+        segundos: Number(meta.segundos) || 0
     });
 
     if (!res || !res.stiker || !res.stiker.length) {
@@ -247,7 +249,9 @@ async function main() {
                         ffmpegPath,
                         parallelAudio: true,
                         videoThreads: 2,
-                        imgThreads: 2
+                        imgThreads: 2,
+                        calidad: process.env.STICKER_CALIDAD || null,
+                        segundos: Number(meta.segundos) || 0
                     });
                     if (!res || !res.stiker || !res.stiker.length) {
                         resp = encodeFrame({ type: 'result', id: meta.id, ok: false, error: 'Conversion vacia' }, []);

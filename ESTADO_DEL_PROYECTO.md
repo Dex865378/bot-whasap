@@ -234,6 +234,13 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Audio**: `STICKER_AUDIO_PARALELO=1` vuelve a correr WebP y audio a la vez (antes secuencial por los 512 MB de Render) y `STICKER_VIDEO_THREADS` permite darle más hilos a ffmpeg.
 - **Sin efecto en Render**: si las variables no están, todo sigue exactamente como antes.
 - **Verificado**: `npm run test-stickers` verde; el caso de video de 14 s sigue bajando hasta 320 px para no pasar el tope.
+### Stickers más rápidos y sin tope por grupo (v11.7.1, 2026-11-27)
+- **Motivo**: un video de 15 s tardaba ~13 s solo en convertir porque arrancaba en 512px/calidad 78 y reencodeaba 3 veces hasta entrar en los 920 KB.
+- **Nuevo**: `perfilInicialAlta(segundos)` en `utils/stickerProcessor.js` elige el perfil de arranque según la duración real del video (la manda WhatsApp en `videoMessage.seconds`): ≤8 s → 512/78, ≤10 s → 512/62, resto → 384/48. Un video de 15 s ahora convierte en **~2,7 s** en vez de ~13 s.
+- **Medido** (720p cargado, 15 s): 512/78/comp4 = 1662 KB en 4,5 s; 384/48/comp2 = 908 KB en 1,7 s. La escalera cae igual si el archivo no entra.
+- **Tope por grupo**: `STICKER_GROUP_PER_MIN=0` desactiva el límite de 15 stickers por grupo/minuto. El **cooldown de 45 s por usuario** y el **global de 4 s** siguen igual (con 4 s global el grupo igual no puede pasar de 15/min).
+- **Sin efecto en Render**: si `segundos` no llega, arranca por el perfil más alto como antes.
+
 
 ### Baileys rc14 + estado de restricción 463 (v11.5.5, 2026-11-26)
 - **Upgrade**: `@whiskeysockets/baileys` 7.0.0-rc.9 → 7.0.0-rc14 (la última en npm ese día). La API que usa el bot (`makeWASocket`, `prepareWAMessageMedia`, `getWAUploadToServer`, `proto`, `downloadMediaMessage`, `getMediaKeys`, `Browsers`) sigue existiendo; smoke, anti-ban y sticker-audio pasan.

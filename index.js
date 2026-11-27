@@ -68,7 +68,8 @@ const FAST_COMMANDS = new Set(['!ping']); // !menu excluido para respetar el fil
 const UNLIMITED_STICKER_CMDS = new Set(['!s', '!sticker']);
 // --- RATE LIMIT DE STICKERS (anti-ban) ---
 const STICKER_USER_COOLDOWN_MS = envInt('STICKER_USER_COOLDOWN_MS', 45000, 1000);
-const STICKER_GROUP_PER_MIN = envInt('STICKER_GROUP_PER_MIN', 15, 1);
+// 0 = sin tope por grupo/minuto (el 45 s por usuario y el cooldown global quedan).
+const STICKER_GROUP_PER_MIN = envInt('STICKER_GROUP_PER_MIN', 15, 0);
 const STICKER_GLOBAL_COOLDOWN_MS = envInt('STICKER_GLOBAL_COOLDOWN_MS', 4000, 1000);
 const stickerGroupBudget = new Map();
 
@@ -1158,11 +1159,12 @@ const stickerPool = new StickerPool({
     maxLocal: envInt('MAX_STICKERS_LOCAL', 1, 1),
     maxQueue: envInt('MAX_COLA_STICKERS', 200, 20),
     workerJobTimeoutMs: envInt('WORKER_JOB_TIMEOUT_MS', 60000, 10000),
-    localRunner: ({ buffer, esVideo, necesitaAudio, audioBuffer }) => procesarStickerCompleto({
+    localRunner: ({ buffer, esVideo, necesitaAudio, audioBuffer, segundos }) => procesarStickerCompleto({
         buffer,
         esVideo,
         necesitaAudio,
         audioBuffer,
+        segundos,
         ffmpegPath: FFMPEG_PATH,
         // En Render (512MB) conviene secuencial; en una PC con RAM de sobra se
         // puede correr audio y WebP en paralelo. STICKER_AUDIO_PARALELO=1 lo activa.
@@ -2208,8 +2210,8 @@ async function procesarMensaje(sock, msg) {
                     }
                     // 2) Cooldown global: mínimo N segundos entre CUALQUIER sticker del bot
                     if (verificarCooldown('BOT', '!s-global', STICKER_GLOBAL_COOLDOWN_MS) > 0) return;
-                    // 3) Presupuesto por grupo/minuto
-                    if (isGroup) {
+                    // 3) Presupuesto por grupo/minuto (desactivado si es 0)
+                    if (isGroup && STICKER_GROUP_PER_MIN > 0) {
                         const ahora = Date.now();
                         let budget = stickerGroupBudget.get(chatId);
                         if (!budget || ahora - budget.windowStart > 60000) {

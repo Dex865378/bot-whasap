@@ -37,6 +37,16 @@ const PERFILES_VIDEO_ALTA = [
     { scale: 256, fps: 10, quality: 28, comp: 2 }
 ];
 
+// Cada perfil aguanta ~X segundos antes de pasar los 920 KB (medido con un
+// video 720p bastante cargado). Arrancar en el perfil que ya entra ahorra
+// reencodear 2-3 veces: un video de 15 s pasa de ~13 s a ~3 s.
+function perfilInicialAlta(segundos) {
+    if (!(segundos > 0)) return 0;
+    if (segundos <= 8) return 0;
+    if (segundos <= 10) return 1;
+    return 2;
+}
+
 function calidadAlta(opts = {}) {
     if (opts.calidad) return opts.calidad === 'alta';
     return process.env.STICKER_CALIDAD === 'alta';
@@ -178,8 +188,12 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
         const basePerfiles = alta
             ? PERFILES_VIDEO_ALTA
             : ((Number(opts.videoThreads) || 1) >= 2 ? PERFILES_VIDEO_PC : PERFILES_VIDEO_LOCAL);
+        const inicio = alta ? Math.min(perfilInicialAlta(Number(opts.segundos) || 0), basePerfiles.length - 1) : 0;
+        if (inicio > 0) {
+            console.log(`[Sticker] Video de ${Math.round(Number(opts.segundos))}s: arranco directo en ${basePerfiles[inicio].scale}px/${basePerfiles[inicio].fps}fps.`);
+        }
         let ultimo = null;
-        for (let i = 0; i < basePerfiles.length; i++) {
+        for (let i = inicio; i < basePerfiles.length; i++) {
             const perfil = (i === 0 && Number(opts.fps) > 0) ? { ...basePerfiles[i], fps: Number(opts.fps) } : basePerfiles[i];
             const webp = await intentar(true, false, null, perfil);
             const conExif = await agregarExifSticker(webp);
@@ -238,14 +252,16 @@ async function procesarStickerCompleto({
     parallelAudio = true,
     videoThreads = 1,
     imgThreads = 2,
-    calidad = null
+    calidad = null,
+    segundos = 0
 }) {
     const ffmpeg = resolverFfmpeg(ffmpegPath);
     const convertir = () => convertirAWebpBuffer(buffer, esVideo, {
         ffmpegPath: ffmpeg,
         videoThreads,
         imgThreads,
-        calidad
+        calidad,
+        segundos
     });
     const sacarAudio = async () => {
         if (!necesitaAudio) return null;

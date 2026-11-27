@@ -201,9 +201,9 @@ class StickerPool {
         });
     }
 
-    async _runLocal({ buffer, esVideo, necesitaAudio, audioBuffer, fallbackConvertir, fallbackAudio }) {
+    async _runLocal({ buffer, esVideo, necesitaAudio, audioBuffer, segundos, fallbackConvertir, fallbackAudio }) {
         if (this.localRunner) {
-            return await this.localRunner({ buffer, esVideo, necesitaAudio, audioBuffer });
+            return await this.localRunner({ buffer, esVideo, necesitaAudio, audioBuffer, segundos });
         }
         const stiker = await fallbackConvertir(buffer, esVideo);
         if (!stiker) return { stiker: null, audio: null };
@@ -248,6 +248,7 @@ class StickerPool {
         getMediaConn = null,
         esVideo = false,
         necesitaAudio = false,
+        segundos = 0,
         fallbackConvertir,
         fallbackAudio,
         maxBytes = 15 * 1024 * 1024
@@ -276,6 +277,7 @@ class StickerPool {
                                 type: 'job_remote',
                                 esVideo: !!esVideo,
                                 necesitaAudio: !!necesitaAudio,
+                                segundos: Number(segundos) || 0,
                                 hasAudioProto: Buffer.isBuffer(audioProtoBytes) && audioProtoBytes.length > 0,
                                 mediaConn
                             },
@@ -311,7 +313,7 @@ class StickerPool {
                         try {
                             const res = await this._dispatchPcFrame(
                                 turn.worker,
-                                { type: 'job', esVideo: !!esVideo, necesitaAudio: !!necesitaAudio },
+                                { type: 'job', esVideo: !!esVideo, necesitaAudio: !!necesitaAudio, segundos: Number(segundos) || 0 },
                                 [bajado.buffer, bajado.audioBuffer || EMPTY_BUF]
                             );
                             if (res?.stiker && res.stiker.length) {
@@ -344,6 +346,7 @@ class StickerPool {
                 esVideo,
                 necesitaAudio,
                 audioBuffer: cachedLocalMedia.audioBuffer,
+                segundos,
                 fallbackConvertir,
                 fallbackAudio
             });

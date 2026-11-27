@@ -676,6 +676,7 @@ module.exports = {
                         getMediaConn,
                         esVideo,
                         necesitaAudio,
+                        segundos: esVideo ? (Number(videoInfo?.seconds) || 0) : 0,
                         fallbackConvertir: convertirAWebp,
                         fallbackAudio,
                         maxBytes: 15 * 1024 * 1024
