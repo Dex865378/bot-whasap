@@ -12,7 +12,16 @@ const { prepararAudioParaSticker } = require('./stickerSonido');
 
 const execFileAsync = promisify(execFile);
 
-const STICKER_MAX_SEGUNDOS = 15;
+// 0 = sin tope de duración: el sticker dura lo que el video. Lo que sí se
+// respeta siempre es el tope de tamaño de WhatsApp (se baja escala/fps).
+function leerTopeSegundos() {
+    const raw = process.env.STICKER_MAX_SEGUNDOS;
+    if (raw === undefined || String(raw).trim() === '') return 0;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.floor(n);
+}
+const STICKER_MAX_SEGUNDOS = leerTopeSegundos();
 const STICKER_VIDEO_FPS = 15;
 const MAX_STICKER_WEBP_BYTES = 920 * 1024; // Margen bajo el tope de ~1 MB de WhatsApp WebP animado
 
@@ -29,22 +38,45 @@ const PERFILES_VIDEO_LOCAL = [
 // Máxima calidad para PC con CPU de sobra (STICKER_CALIDAD=alta): 512px,
 // 20 fps, scaler lanczos y WebP con más calidad. Si el archivo pasa el tope,
 // cae a los perfiles siguientes en vez de mandar algo ilegible.
+// kbps = KB por segundo medidos en un video 720p cargado. Sirven para elegir
+// el perfil de arranque según la duración y evitar reencodear 2-3 veces.
 const PERFILES_VIDEO_ALTA = [
-    { scale: 512, fps: 15, quality: 78, comp: 4 },
-    { scale: 512, fps: 15, quality: 62, comp: 3 },
-    { scale: 384, fps: 15, quality: 48, comp: 3 },
-    { scale: 320, fps: 12, quality: 36, comp: 2 },
-    { scale: 256, fps: 10, quality: 28, comp: 2 }
+    { scale: 512, fps: 15, quality: 78, comp: 4, kbps: 111 },
+    { scale: 512, fps: 15, quality: 62, comp: 3, kbps: 89 },
+    { scale: 384, fps: 15, quality: 48, comp: 3, kbps: 56 },
+    { scale: 320, fps: 12, quality: 36, comp: 2, kbps: 43 },
+    { scale: 256, fps: 12, quality: 32, comp: 2, kbps: 27 },
+    { scale: 224, fps: 10, quality: 28, comp: 2, kbps: 17 },
+    { scale: 192, fps: 8, quality: 24, comp: 2, kbps: 10 }
 ];
 
-// Cada perfil aguanta ~X segundos antes de pasar los 920 KB (medido con un
-// video 720p bastante cargado). Arrancar en el perfil que ya entra ahorra
-// reencodear 2-3 veces: un video de 15 s pasa de ~13 s a ~3 s.
-function perfilInicialAlta(segundos) {
+// Sin tope de duración un video de 2-3 minutos no entra en 920 KB ni con el
+// último perfil fijo, así que se sigue bajando escala y fps hasta 96px/3fps.
+function perfilesAlta() {
+    const lista = PERFILES_VIDEO_ALTA.map(p => ({ ...p }));
+    while (lista.length < 12) {
+        const prev = lista[lista.length - 1];
+        const next = {
+            scale: Math.max(96, Math.round((prev.scale * 0.8) / 8) * 8),
+            fps: Math.max(3, Math.round(prev.fps * 0.8)),
+            quality: Math.max(20, prev.quality - 2),
+            comp: 2
+        };
+        if (next.scale === prev.scale && next.fps === prev.fps) break;
+        next.kbps = Math.max(2, Math.round(prev.kbps * (next.scale ** 2 * next.fps) / (prev.scale ** 2 * prev.fps)));
+        lista.push(next);
+    }
+    return lista;
+}
+
+function perfilInicialAlta(segundos, maxBytes = MAX_STICKER_WEBP_BYTES) {
     if (!(segundos > 0)) return 0;
-    if (segundos <= 8) return 0;
-    if (segundos <= 10) return 1;
-    return 2;
+    const perfiles = perfilesAlta();
+    const presupuestoKb = (Number(maxBytes) / 1024) * 0.95;
+    for (let i = 0; i < perfiles.length; i++) {
+        if (segundos * perfiles[i].kbps <= presupuestoKb) return i;
+    }
+    return perfiles.length - 1;
 }
 
 function calidadAlta(opts = {}) {
@@ -149,10 +181,12 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
             const esAnimado = comoVideo && !soloUnFrame;
             const vsyncArgs = esAnimado ? await resolverArgsVsync(ffmpegPath) : [];
             const p = perfil || { scale: 512, fps: STICKER_VIDEO_FPS, quality: 45, comp: 1 };
-            const maxSeg = String(opts.maxSegundos || STICKER_MAX_SEGUNDOS);
+            const maxSeg = Number(opts.maxSegundos ?? STICKER_MAX_SEGUNDOS) > 0
+                ? String(Math.floor(Number(opts.maxSegundos ?? STICKER_MAX_SEGUNDOS)))
+                : null;
             const interp = alta ? 'lanczos' : 'bilinear';
             const args = esAnimado
-                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', `${vfBase(p.scale, interp)},fps=${p.fps}`, '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, '-t', maxSeg, '-quality', String(p.quality), '-compression_level', String(p.comp), '-y', tmpOut]
+                ? ['-threads', videoThreads, '-i', tmpIn, '-vf', `${vfBase(p.scale, interp)},fps=${p.fps}`, '-vcodec', 'libwebp', '-loop', '0', '-preset', 'default', '-an', ...vsyncArgs, ...(maxSeg ? ['-t', maxSeg] : []), '-quality', String(p.quality), '-compression_level', String(p.comp), '-y', tmpOut]
                 : ['-threads', imgThreads, '-i', tmpIn, '-vf', vfBase(512, 'lanczos'), ...(soloUnFrame ? ['-vframes', '1'] : []), '-quality', alta ? '90' : '75', '-compression_level', alta ? '5' : '4', '-y', tmpOut];
             await execFileAsync(ffmpegPath, args, { timeout: esAnimado ? 90000 : 25000, windowsHide: true });
             return await fs.promises.readFile(tmpOut);
@@ -186,9 +220,9 @@ async function convertirAWebpBuffer(buffer, isVideo = false, opts = {}) {
         }
 
         const basePerfiles = alta
-            ? PERFILES_VIDEO_ALTA
+            ? perfilesAlta()
             : ((Number(opts.videoThreads) || 1) >= 2 ? PERFILES_VIDEO_PC : PERFILES_VIDEO_LOCAL);
-        const inicio = alta ? Math.min(perfilInicialAlta(Number(opts.segundos) || 0), basePerfiles.length - 1) : 0;
+        const inicio = alta ? Math.min(perfilInicialAlta(Number(opts.segundos) || 0, maxBytes), basePerfiles.length - 1) : 0;
         if (inicio > 0) {
             console.log(`[Sticker] Video de ${Math.round(Number(opts.segundos))}s: arranco directo en ${basePerfiles[inicio].scale}px/${basePerfiles[inicio].fps}fps.`);
         }

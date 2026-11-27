@@ -589,7 +589,7 @@ const helpData = {
         cooldown: 'Ninguno'
     },
     '!s': {
-        desc: 'Crea un sticker de imagen, GIF o video (hasta 15 segundos, 15 fps). Videos e imágenes con audio citado conservan el sonido hasta 15s.',
+        desc: 'Crea un sticker de imagen, GIF o video (sin tope de duración: si el video es largo se baja la calidad para entrar en WhatsApp). Videos e imágenes con audio citado conservan el sonido completo.',
         usage: '!s (responde a imagen/video o ponlo de caption)',
         ejemplo: '!s\n(responder a audio con imagen y caption !s)',
         args: 'Imagen, video/GIF o documento multimedia',
@@ -597,7 +597,7 @@ const helpData = {
         alias: '!sticker'
     },
     '!sticker': {
-        desc: 'Alias de !s. Crea un sticker de imagen, GIF o video (hasta 15 segundos) con soporte de sonido.',
+        desc: 'Alias de !s. Crea un sticker de imagen, GIF o video (sin tope de duración) con soporte de sonido.',
         usage: '!sticker',
         ejemplo: '!sticker',
         args: 'Imagen, video/GIF o documento multimedia',

@@ -201,7 +201,7 @@ class StickerPool {
         });
     }
 
-    async _runLocal({ buffer, esVideo, necesitaAudio, audioBuffer, segundos, fallbackConvertir, fallbackAudio }) {
+    async _runLocal({ buffer, esVideo, necesitaAudio, audioBuffer, segundos, maxSegundos, fallbackConvertir, fallbackAudio }) {
         if (this.localRunner) {
             return await this.localRunner({ buffer, esVideo, necesitaAudio, audioBuffer, segundos });
         }
@@ -211,9 +211,9 @@ class StickerPool {
         if (necesitaAudio) {
             try {
                 if (audioBuffer && audioBuffer.length && fallbackAudio) {
-                    audio = await fallbackAudio(audioBuffer, 15);
+                    audio = await fallbackAudio(audioBuffer, maxSegundos);
                 } else if (esVideo && fallbackAudio) {
-                    audio = await fallbackAudio(buffer, 15);
+                    audio = await fallbackAudio(buffer, maxSegundos);
                 }
             } catch (_) { audio = null; }
         }
@@ -249,6 +249,7 @@ class StickerPool {
         esVideo = false,
         necesitaAudio = false,
         segundos = 0,
+        maxSegundos = 0,
         fallbackConvertir,
         fallbackAudio,
         maxBytes = 15 * 1024 * 1024
@@ -347,6 +348,7 @@ class StickerPool {
                 necesitaAudio,
                 audioBuffer: cachedLocalMedia.audioBuffer,
                 segundos,
+                maxSegundos,
                 fallbackConvertir,
                 fallbackAudio
             });

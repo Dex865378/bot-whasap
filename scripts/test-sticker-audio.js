@@ -175,7 +175,7 @@ function sockFalso({ fallaUpload = false } = {}) {
         });
         assert.strictEqual(estado.relay, 1, 'debe mandar por relayMessage');
         assert.strictEqual(estado.enviados.length, 0, 'no debe mandar además el sticker normal');
-        assert.strictEqual(maxAudio, 15, 'el audio del video permite hasta 15s como el sticker');
+        assert.strictEqual(maxAudio, 0, 'el audio acompaña al video completo (0 = sin tope de duración)');
         const audio = leerAudioDelMensaje(estado.capturado);
         assert.ok(audio, 'el mensaje debe llevar el campo 26');
     });
@@ -820,7 +820,7 @@ function sockFalso({ fallaUpload = false } = {}) {
         await probar('convertirAWebpBuffer convierte video real de 14s a WebP animado (~15 fps, <= 920 KB)', async () => {
             const { esWebpAnimado } = require('../utils/media');
             const { STICKER_MAX_SEGUNDOS, STICKER_VIDEO_FPS, MAX_STICKER_WEBP_BYTES } = require('../utils/stickerProcessor');
-            assert.strictEqual(STICKER_MAX_SEGUNDOS, 15, 'tope animado debe ser 15 segundos');
+            assert.strictEqual(STICKER_MAX_SEGUNDOS, 0, 'sin tope de duración por defecto (0 = video completo)');
             assert.ok(STICKER_VIDEO_FPS >= 15, 'FPS debe ser >= 15');
             const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-vid-test-'));
             const vidPath = path.join(dir, 'clip.mp4');
@@ -842,6 +842,30 @@ function sockFalso({ fallaUpload = false } = {}) {
                 // Re-convertir ese mismo WebP animado no debe fallar como "formato raro"
                 const reOut = await convertirAWebpBuffer(out, false, { ffmpegPath: FFMPEG });
                 assert.ok(reOut && reOut.length > 100 && esWebpAnimado(reOut), 'WebP animado reenviado debe conservarse valido');
+            } finally {
+                try { fs.unlinkSync(vidPath); } catch (_) { }
+                try { fs.rmdirSync(dir); } catch (_) { }
+            }
+        });
+    }
+
+    if (TIENE_FFMPEG) {
+        await probar('video de 20s ya no se corta a 15s y sigue entrando en el tope de tamaño', async () => {
+            const { convertirAWebpBuffer, MAX_STICKER_WEBP_BYTES } = require('../utils/stickerProcessor');
+            const { esWebpAnimado } = require('../utils/media');
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stk-vid-20-'));
+            const vidPath = path.join(dir, 'clip20.mp4');
+            try {
+                execFileSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=240x240:rate=30', '-t', '20', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-y', vidPath], { windowsHide: true });
+                const out = await convertirAWebpBuffer(fs.readFileSync(vidPath), true, { ffmpegPath: FFMPEG, videoThreads: 2, segundos: 20 });
+                assert.ok(out && esWebpAnimado(out), 'debe producir WebP animado valido');
+                assert.ok(out.length <= MAX_STICKER_WEBP_BYTES, `20s debe caber en el tope de tamaño (${out.length} > ${MAX_STICKER_WEBP_BYTES})`);
+                const { Image } = require('node-webpmux');
+                const webpImg = new Image();
+                await webpImg.load(out);
+                const frames = webpImg.frames || [];
+                const durMs = frames.reduce((s, f) => s + (Number(f.delay) || 0), 0);
+                assert.ok(durMs >= 18000, `el sticker debe conservar los 20s completos (fue ${durMs}ms)`);
             } finally {
                 try { fs.unlinkSync(vidPath); } catch (_) { }
                 try { fs.rmdirSync(dir); } catch (_) { }

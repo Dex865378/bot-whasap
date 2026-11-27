@@ -9,6 +9,7 @@ const { proto } = require('@whiskeysockets/baileys');
 const { esWebpAnimado, primerFrameWebp } = require('../utils/media');
 const { enviarStickerConSonido, enviarStickerPreSubido } = require('../utils/stickerSonido');
 const { construirClaveCache, obtenerStickerCache, guardarStickerCache, borrarStickerCache } = require('../utils/stickerCache');
+const { STICKER_MAX_SEGUNDOS } = require('../utils/stickerProcessor');
 
 function serializarMediaProto(mediaObj, tipoClave) {
     try {
@@ -295,9 +296,9 @@ const MENU_SECCIONES = [
         aliases: ['herramienta', 'sticker', 'stickers', 'util', 'utilidades', 'tools'],
         icono: '🛠️',
         titulo: 'HERRAMIENTAS',
-        resumen: 'Stickers (15s), voz, letras y utilidades',
+        resumen: 'Stickers, voz, letras y utilidades',
         items: [
-            { cmd: '!s', desc: 'Sticker de imagen o video/audio hasta 15s (responde o pon !s).' },
+            { cmd: '!s', desc: 'Sticker de imagen o video/audio sin tope de duración (responde o pon !s).' },
             { cmd: '!toimg', desc: 'Convertir sticker a foto.' },
             { cmd: '!decir <texto>', desc: 'El bot lo dice con voz grave.' },
             { cmd: '!setdecir', desc: 'Ver los 15 idiomas de !decir.' },
@@ -588,7 +589,7 @@ module.exports = {
                 // desde el log de Render sin adivinar.
                 if (quoted) console.warn('[STICKER] Citado sin media reconocible. Claves:', Object.keys(quoted).join(','));
                 return sock.sendMessage(chatId, {
-                    text: '*Como usar el sticker maker:*\n\n• Responde a una imagen/video con *!s*.\n• Video/GIF: hasta 15 segundos, sale con sonido.\n• Imagen con sonido: responde al audio (hasta 15s) con la imagen y pon *!s* de caption.\n\nEl sonido se reproduce en clientes con stickers con sonido (beta).'
+                    text: '*Como usar el sticker maker:*\n\n• Responde a una imagen/video con *!s*.\n• Video/GIF: sin tope de duración (si dura mucho se baja la calidad para que entre en WhatsApp), sale con sonido.\n• Imagen con sonido: responde al audio con la imagen y pon *!s* de caption.\n\nEl sonido se reproduce en clientes con stickers con sonido (beta).'
                 }, { quoted: msg });
             }
 
@@ -600,12 +601,13 @@ module.exports = {
                 || media === citada?.videoMessage
                 || (media === msg.message?.documentMessage && msgDocEsVideo)
                 || (media === citada?.documentMessage && docEsVideo));
-            // Video largo: NO se rechaza, se convierte igual. ffmpeg recorta
-            // solo los primeros 15 segundos (-t 15) y el tope real es
-            // la descarga de 15MB.
+            // Video largo: NO se rechaza ni se corta. Con STICKER_MAX_SEGUNDOS=0
+            // (por defecto) se convierte el video completo; el único tope real
+            // es el peso (15MB de descarga y 920KB del WebP, que se ajusta
+            // bajando escala/fps).
             const videoInfo = esVideo ? media : null;
-            if (videoInfo && videoInfo.seconds > 15) {
-                console.log(`[STICKER] Video largo (${Math.round(videoInfo.seconds)}s): se convierte con los primeros 15 segundos.`);
+            if (videoInfo && videoInfo.seconds > 60) {
+                console.log(`[STICKER] Video largo (${Math.round(videoInfo.seconds)}s): se convierte completo, ajustando calidad.`);
             }
 
             const entradaMedia = mediaPropia ? msg : { key: msg.key, message: citada };
@@ -677,6 +679,7 @@ module.exports = {
                         esVideo,
                         necesitaAudio,
                         segundos: esVideo ? (Number(videoInfo?.seconds) || 0) : 0,
+                        maxSegundos: STICKER_MAX_SEGUNDOS,
                         fallbackConvertir: convertirAWebp,
                         fallbackAudio,
                         maxBytes: 15 * 1024 * 1024
@@ -721,10 +724,10 @@ module.exports = {
                             if (audioCitado) {
                                 const audioBuf = await descargarConTimeout(downloadMediaMessage, { key: msg.key, message: citada });
                                 if (audioBuf && audioBuf.length && audioBuf.length <= 15 * 1024 * 1024) {
-                                    return await fallbackAudio(audioBuf, 15);
+                                    return await fallbackAudio(audioBuf, STICKER_MAX_SEGUNDOS);
                                 }
                             }
-                            if (esVideo) return await fallbackAudio(buffer, 15);
+                            if (esVideo) return await fallbackAudio(buffer, STICKER_MAX_SEGUNDOS);
                         } catch (eAudio) {
                             console.warn('[STICKER] No pude preparar el sonido:', eAudio.message);
                         }

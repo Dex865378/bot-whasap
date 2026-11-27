@@ -98,11 +98,12 @@ function extParaBuffer(buffer, comoVideo) {
 // --- Audio para sticker con sonido ---
 // Extrae la primera pista de audio y la normaliza a OGG/Opus mono, que es lo
 // que WhatsApp usa para las notas de voz y para el audio del sticker.
-// `maxSegundos` se limita a 15 (tope de la función). Si el video no tiene
-// audio, ffmpeg falla y se devuelve null: el caller manda el sticker normal.
-async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 15) {
+// `maxSegundos` 0 = sin tope (audio completo). Si el video no tiene audio,
+// ffmpeg falla y se devuelve null: el caller manda el sticker normal.
+async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 0) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-    const tope = Math.max(1, Math.min(15, Number.isFinite(Number(maxSegundos)) ? Number(maxSegundos) : 15));
+    const pedido = Number(maxSegundos);
+    const tope = Number.isFinite(pedido) && pedido > 0 ? Math.min(600, Math.floor(pedido)) : 0;
     const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const tmpIn = path.join(os.tmpdir(), `stk_audio_in_${uid}.bin`);
     const tmpOut = path.join(os.tmpdir(), `stk_audio_out_${uid}.ogg`);
@@ -116,7 +117,7 @@ async function extraerAudioSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 
             '-vn', '-map', '0:a:0?',
             '-ac', '1', '-ar', '48000',
             '-c:a', 'libopus', '-b:a', '32k', '-application', 'audio',
-            '-t', String(tope),
+            ...(tope > 0 ? ['-t', String(tope)] : []),
             '-f', 'ogg', '-y', tmpOut
         ];
         await execFileAsync(ffmpegPath, args, { timeout: 25000, windowsHide: true, maxBuffer: 1024 * 1024 });

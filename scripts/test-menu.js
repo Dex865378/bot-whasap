@@ -85,7 +85,7 @@ async function runMenu(cmdStart, args = [], { manga = false, db = {} } = {}) {
 
         const envStickers = await runMenu('!menu', ['stickers']);
         const txtStickers = textoDe(envStickers[0]);
-        assert.ok(txtStickers.includes('!s') && txtStickers.includes('15'), 'herramientas refleja tope de 15s en !s');
+        assert.ok(txtStickers.includes('!s') && txtStickers.includes('sin tope'), 'herramientas refleja que !s no tiene tope de duración');
         assert.ok(!txtStickers.includes('!marry'), 'herramientas no mezcla social');
     });
 
@@ -114,9 +114,9 @@ async function runMenu(cmdStart, args = [], { manga = false, db = {} } = {}) {
         assert.ok(!txt.includes('!slot'), 'no debe listar todos los comandos');
     });
 
-    await probar('helpData documenta !s (15s, 45s cooldown) y !menu con categorías', () => {
+    await probar('helpData documenta !s (sin tope de duración, 45s cooldown) y !menu con categorías', () => {
         assert.ok(helpData['!s'], 'helpData debe incluir !s');
-        assert.ok(helpData['!s'].desc.includes('15'), 'helpData !s debe mencionar 15s');
+        assert.ok(helpData['!s'].desc.includes('sin tope'), 'helpData !s debe aclarar que no hay tope de duración');
         assert.ok(helpData['!s'].cooldown.includes('45'), 'helpData !s debe mencionar cooldown 45s');
         assert.ok(helpData['!menu'].usage.includes('categoria') || helpData['!menu'].usage.includes('todo'), 'helpData !menu debe documentar categorías');
     });

@@ -240,6 +240,15 @@ Plan completo en `PLAN_RENDIMIENTO_RENDER.md`. Resumen de lo aplicado:
 - **Medido** (720p cargado, 15 s): 512/78/comp4 = 1662 KB en 4,5 s; 384/48/comp2 = 908 KB en 1,7 s. La escalera cae igual si el archivo no entra.
 - **Tope por grupo**: `STICKER_GROUP_PER_MIN=0` desactiva el límite de 15 stickers por grupo/minuto. El **cooldown de 45 s por usuario** y el **global de 4 s** siguen igual (con 4 s global el grupo igual no puede pasar de 15/min).
 - **Sin efecto en Render**: si `segundos` no llega, arranca por el perfil más alto como antes.
+### Stickers sin tope de duración (v11.7.2, 2026-11-27)
+- **Bug**: todo video se recortaba a 15 s (`-t 15` en `convertirAWebpBuffer` y en `prepararAudioParaSticker`) aunque el usuario había pedido quitar ese límite.
+- **Ahora**: `STICKER_MAX_SEGUNDOS=0` (valor por defecto) manda el video **completo**. El único tope real es el peso: 920 KB de WebP, que se respeta bajando escala/fps con la escalera extendida (`perfilesAlta()` sigue hasta 96px/3fps).
+- **Medido**: 20 s → 20,0 s (320px/12fps, ~4 s de conversión); 45 s → 45,0 s (224px/10fps, 616 KB, 3,2 s); 180 s → 180,0 s (120px/5fps, 574 KB, 6,4 s).
+- **Audio**: `prepararAudioParaSticker` y `extraerAudioSticker` aceptan 0 = sin tope y el campo `seconds` del audio ya no se clampa a 15.
+- **Volver a limitar**: `STICKER_MAX_SEGUNDOS=15` en `.env`.
+- **Aviso**: stickers de más de ~30 s pueden no reproducirse en algunos clientes de WhatsApp; el envío no falla.
+- **Test de regresión**: `scripts/test-sticker-audio.js` convierte un video de 20 s y exige `duración >= 18 s` y `<= 920 KB` (antes fallaba con 15.000 ms).
+
 
 
 ### Baileys rc14 + estado de restricción 463 (v11.5.5, 2026-11-26)

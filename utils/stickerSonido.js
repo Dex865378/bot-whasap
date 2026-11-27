@@ -236,9 +236,11 @@ async function esperarArchivoCifrado(filePath, expectedSha256B64, maxEsperaMs = 
     }
 }
 
-async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 15) {
+async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegundos = 0) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
-    const tope = Math.max(1, Math.min(15, Number.isFinite(Number(maxSegundos)) ? Number(maxSegundos) : 15));
+    // 0 = sin tope: el audio dura lo mismo que el video (el sticker tampoco corta).
+    const pedido = Number(maxSegundos);
+    const tope = Number.isFinite(pedido) && pedido > 0 ? Math.min(600, Math.floor(pedido)) : 0;
     const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const tmpIn = path.join(os.tmpdir(), `stk_info_in_${uid}.bin`);
     const tmpOgg = path.join(os.tmpdir(), `stk_info_out_${uid}.ogg`);
@@ -253,11 +255,11 @@ async function prepararAudioParaSticker(buffer, ffmpegPath = 'ffmpeg', maxSegund
             '-vn', '-sn', '-dn', '-map', '0:a:0?', '-map_metadata', '-1',
             '-af', 'asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0',
             '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '32k', '-application', 'audio',
-            '-avoid_negative_ts', 'make_zero', '-t', String(tope), '-f', 'ogg', '-y', tmpOgg,
+            '-avoid_negative_ts', 'make_zero', ...(tope > 0 ? ['-t', String(tope)] : []), '-f', 'ogg', '-y', tmpOgg,
             '-vn', '-sn', '-dn', '-map', '0:a:0?',
             '-af', 'asetpts=PTS-STARTPTS,aresample=8000:async=1:first_pts=0',
             '-f', 's16le', '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '8000',
-            '-t', String(tope), '-y', tmpPcm
+            ...(tope > 0 ? ['-t', String(tope)] : []), '-y', tmpPcm
         ], { timeout: 30000, windowsHide: true, maxBuffer: 1024 * 1024 });
 
         const [oggRead, pcm] = await Promise.all([
@@ -314,7 +316,7 @@ async function subirYArmarSticker({
         mediaUploadTimeoutMs
     };
 
-    const seg = conAudio ? Math.max(1, Math.min(15, Math.round(Number(audioInfo.segundos) || 3))) : 0;
+    const seg = conAudio ? Math.max(1, Math.min(3600, Math.round(Number(audioInfo.segundos) || 3))) : 0;
 
     let stickerMedia, audioMedia;
     if (conAudio && parallelUpload) {
