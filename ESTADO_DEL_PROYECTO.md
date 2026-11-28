@@ -15,6 +15,7 @@ Este documento es la BIBLIA del proyecto. TODO asistente DEBE leerlo PRIMERO ant
 6. **NO editar `index.js` para añadir comandos**. Ahora se deben añadir en la carpeta `commands/` siguiendo la estructura modular.
 7. **NO reducir la lista de países en `!bandera`**. La base de datos debe mantener siempre los 196 países registrados en `triviaData.js`.
 8. **NO cambiar el temporizador de 1 minuto** en el comando `!bandera`. Es una mecánica de "Muerte Súbita" que debe permanecer inalterable.
+9. **NO volver a poner `powershell.exe` como acción de `DikyBotRun` / `DikyBotWatchdog`**. Abre una consola visible cada minuto (el watchdog corre 1/min) y molesta en pantalla. Las tareas llaman a `wscript.exe //nologo "C:\Users\Dex\.diky\oculto.vbs" "<script.ps1>"`, que lanza PowerShell con la ventana oculta de verdad; el `wscript` se queda esperando para que la tarea siga en estado *Running* (el watchdog lo verifica).
 
 - **Rango y Prestigio Dinámico**: 
     - **Nuevos Rangos:** Estudiante, Genin, Chunin, Jonin, Jonin Especial, Kage, Sannin, Maestro Elemental y Deidad.
